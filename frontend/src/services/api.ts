@@ -3,7 +3,10 @@
  * Strictly maps 1-to-1 to FastAPI routes with encoded symbol handling.
  */
 
+const API_BASE = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
+
 async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
+  const fullUrl = API_BASE ? `${API_BASE}${url}` : url;
   const headers: Record<string, string> = {
     Accept: "application/json",
     ...(options.headers as Record<string, string>),
@@ -13,7 +16,7 @@ async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
     headers["Content-Type"] = "application/json";
   }
 
-  const response = await fetch(url, { ...options, headers });
+  const response = await fetch(fullUrl, { ...options, headers });
 
   if (!response.ok) {
     let errorDetail = `HTTP ${response.status}: ${response.statusText}`;

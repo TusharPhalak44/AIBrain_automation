@@ -107,9 +107,15 @@ export function useLiveStore() {
 
   const connectWs = useCallback(() => {
     try {
-      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      // Connect through Vite proxy /ws to eliminate CORS / cross-origin issues
-      const url = `${protocol}//${window.location.host}/ws/live`;
+      const explicitWs = (import.meta.env.VITE_WS_URL || "").trim().replace(/\/+$/, "");
+      let url: string;
+      if (explicitWs) {
+        url = `${explicitWs}/ws/live`;
+      } else {
+        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        // Connect through Vite proxy /ws to eliminate CORS / cross-origin issues
+        url = `${protocol}//${window.location.host}/ws/live`;
+      }
 
       const ws = new WebSocket(url);
       wsRef.current = ws;

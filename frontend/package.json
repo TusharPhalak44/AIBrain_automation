@@ -2,6 +2,7 @@
   "name": "xm-trading-portal-frontend",
   "version": "2.0.0",
   "private": true,
+  "type": "module",
   "description": "V2 Multi-Asset Automated Trading & Strategy Testing Portal Frontend",
   "scripts": {
     "dev": "vite",
