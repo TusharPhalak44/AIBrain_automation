@@ -27,6 +27,7 @@ interface CockpitTabProps {
   selectedSymbol: string;
   selectedTimeframe: string;
   isMt5Connected: boolean;
+  executionMode?: string;
   openPositions: OpenPosition[];
   plannedTrades: PlannedTrade[];
   pairSchedules: Record<string, PairSchedule>;
@@ -53,6 +54,7 @@ export const CockpitTab: React.FC<CockpitTabProps> = ({
   selectedSymbol,
   selectedTimeframe,
   isMt5Connected,
+  executionMode = "AUTO",
   openPositions,
   plannedTrades,
   pairSchedules,
@@ -363,10 +365,18 @@ export const CockpitTab: React.FC<CockpitTabProps> = ({
                 <Layers className="w-3.5 h-3.5" />
                 <span>Open Positions ({openPositions.length})</span>
               </span>
-              <span className="text-amber-400">
-                Copilot Setups ({plannedTrades.length})
-              </span>
+              {plannedTrades.length > 0 && (
+                <span className="text-amber-400">
+                  Pending Setups ({plannedTrades.length})
+                </span>
+              )}
             </div>
+            {executionMode === "AUTO" ? (
+              <span className="flex items-center gap-1.5 text-[10px] font-bold text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-800/60">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
+                <span>AUTO-EXECUTION ACTIVE (Direct MT5 Order Placement)</span>
+              </span>
+            ) : null}
           </div>
 
           {/* Body Content */}

@@ -24,10 +24,24 @@ logger = logging.getLogger(__name__)
 
 
 def auto_bootstrap_database(custom_db_name: str = None) -> None:
-    """Connect to MySQL server and ensure database exists before engine binding."""
+    """Connect to MySQL server and ensure database exists before engine binding.
+    Compatible with both local XAMPP (root) and remote hosting panels (cPanel/RDS/PlanetScale).
+    """
     target_db = custom_db_name or settings.MYSQL_DATABASE
     base_uri = settings.mysql_base_uri
 
+    # 1. First test if direct connection to target database already works (e.g. remote cPanel hosting)
+    try:
+        direct_engine = create_engine(settings.mysql_database_uri, pool_pre_ping=True)
+        with direct_engine.connect() as conn:
+            conn.execute(text("SELECT 1;"))
+        direct_engine.dispose()
+        logger.info(f"Connected directly to existing MySQL database: {target_db}")
+        return
+    except Exception as direct_err:
+        logger.debug(f"Direct connection to '{target_db}' not yet active: {direct_err}. Attempting creation...")
+
+    # 2. If target DB doesn't exist yet, attempt CREATE DATABASE on base_uri (XAMPP / local dev)
     try:
         temp_engine = create_engine(base_uri, isolation_level="AUTOCOMMIT")
         with temp_engine.connect() as conn:
@@ -40,8 +54,9 @@ def auto_bootstrap_database(custom_db_name: str = None) -> None:
         temp_engine.dispose()
         logger.info(f"Verified/created MySQL database: {target_db}")
     except Exception as e:
-        logger.error(f"Failed to auto-bootstrap MySQL database '{target_db}': {e}")
-        raise
+        logger.warning(
+            f"Could not auto-create database '{target_db}' on base server ({e}). Assuming pre-created on hosting panel."
+        )
 
 
 def get_engine(database_url: str = None):

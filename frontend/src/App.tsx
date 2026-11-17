@@ -141,6 +141,7 @@ const AppContent: React.FC = () => {
               selectedSymbol={store.selectedSymbol}
               selectedTimeframe={store.selectedTimeframe}
               isMt5Connected={store.isMt5Connected}
+              executionMode={store.executionMode}
               openPositions={store.openPositions}
               plannedTrades={store.plannedTrades}
               pairSchedules={store.pairSchedules}
