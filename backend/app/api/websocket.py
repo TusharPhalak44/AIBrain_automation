@@ -49,7 +49,7 @@ async def get_live_state() -> dict:
     with SessionLocal() as db:
         st = db.query(AppSettings).filter_by(id=1).first()
         active_type = st.active_account_type if st else "DEMO"
-        exec_mode = st.execution_mode if st else "COPILOT"
+        exec_mode = st.execution_mode if (st and st.execution_mode in ["AUTO", "HALTED"]) else "AUTO"
         profile = db.query(MT5AccountProfile).filter_by(account_type=active_type).first()
 
         closed_trades = db.query(TradeLedger).filter(
@@ -90,11 +90,14 @@ async def get_live_state() -> dict:
     server_name = profile.server_name if profile else "XMGlobal-MT5"
     algo_trading_enabled = False
     open_positions = []
+    pending_orders = []
     quotes: dict = {}
 
     is_conn = mt5_connector.is_connected
     if is_conn:
         try:
+            open_positions = await mt5_connector.get_open_positions()
+            pending_orders = await mt5_connector.get_pending_orders()
             import MetaTrader5 as mt5
             from backend.app.mt5_bridge.mt5_actor import mt5_actor
 
@@ -115,9 +118,9 @@ async def get_live_state() -> dict:
                         "trade_allowed": bool(acc.trade_allowed) and bool(term.trade_allowed if term else True),
                     }
 
-                # 7-pair live ticks
+                # Strict 2-Pair Focus: GOLD# and BTCUSD# ONLY
                 ticks_data = {}
-                symbols = ["GOLD#", "EURUSD#", "GBPUSD#", "USDJPY#", "BTCUSD#", "ETHUSD#", "SOLUSD#"]
+                symbols = ["GOLD#", "BTCUSD#"]
                 for sym in symbols:
                     mt5.symbol_select(sym, True)
                     tick = mt5.symbol_info_tick(sym)
@@ -235,8 +238,8 @@ async def get_live_state() -> dict:
         "today_closed_net_pnl": round(today_net_pnl, 2),
         "open_positions_count": len(open_positions),
         "open_positions": open_positions,
-        "planned_trades": planned_trades,
-        "copilot_setups": planned_trades,
+        "pending_orders_count": len(pending_orders),
+        "pending_orders": pending_orders,
         "pair_schedules": pair_schedules,
         "quotes": quotes,
         "timestamp_ist": to_ist_str(now_utc()),

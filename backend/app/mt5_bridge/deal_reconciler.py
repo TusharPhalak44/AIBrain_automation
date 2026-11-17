@@ -143,13 +143,14 @@ class DealReconciler:
                         db.commit()
                         logger.info(f"Reconciled trade #{pos_id}: Net PnL ${total_net:.2f} ({exit_reason})")
 
-                        # Trigger SL-hit forensic learner post-mortem hook
-                        if exit_reason == "SL_HIT":
-                            try:
-                                from backend.app.ai_brain.forensic_learner import forensic_learner
+                        # Trigger closed-loop pattern learning & SL-hit postmortem hooks
+                        try:
+                            from backend.app.ai_brain.forensic_learner import forensic_learner
+                            forensic_learner.update_pattern_memory_on_trade_close(trade.id, db)
+                            if exit_reason == "SL_HIT":
                                 forensic_learner.run_sl_hit_postmortem(trade.id, db)
-                            except Exception as fe:
-                                logger.warning(f"Error running SL postmortem for trade #{trade.id}: {fe}")
+                        except Exception as fe:
+                            logger.warning(f"Error updating pattern memory or running SL postmortem for trade #{trade.id}: {fe}")
 
                         # Dispatch Telegram alert if notifier configured
                         if self.telegram_notifier:

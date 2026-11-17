@@ -147,7 +147,7 @@ class LiveIntervalScheduler:
                     active_acc = st.active_account_type if st else "DEMO"
 
                     if exec_mode == "AUTO":
-                        await self._check_and_auto_execute_planned_setups(db, active_acc)
+                        await self._monitor_pending_limit_orders(db, active_acc)
 
                 if exec_mode == "HALTED":
                     for sched in self.pair_schedules.values():
@@ -172,44 +172,98 @@ class LiveIntervalScheduler:
 
             await asyncio.sleep(1.0)
 
-    async def _check_and_auto_execute_planned_setups(self, db: Session, active_account: str) -> None:
-        """Auto-execute PLANNED trades when market price enters the planned trigger zone."""
-        if not mt5_connector.is_connected:
-            return
-
-        import MetaTrader5 as mt5
-
+    async def _monitor_pending_limit_orders(self, db: Session, active_account: str) -> None:
+        """Monitor resting pending limit orders: detect broker fills, cancel if structure invalidated, or expire."""
         try:
-            planned = (
+            pending_trades = (
                 db.query(TradeLedger)
-                .filter_by(account_type=active_account.upper(), status="PLANNED")
+                .filter_by(account_type=active_account.upper(), status="PENDING")
                 .all()
             )
-            if not planned:
+            if not pending_trades:
                 return
 
-            for trade in planned:
-                try:
-                    tick = mt5.symbol_info_tick(trade.symbol)
-                    if not tick:
-                        continue
-                    cur_price = tick.ask if trade.direction == "BUY" else tick.bid
-                    entry = float(trade.entry_price)
-                    pair_bot = db.query(TradingPairBot).filter_by(symbol=trade.symbol).first()
-                    digits = pair_bot.digits if pair_bot else 2
+            if not mt5_connector.is_connected:
+                return
 
-                    dist_pts = int(round(abs(cur_price - entry) * (10 ** digits)))
-                    # If market price is within 12 points of planned entry, trigger execution!
-                    if dist_pts <= 12:
-                        logger.info(
-                            f"AUTO TRIGGER: Price {cur_price} reached planned entry {entry} ({dist_pts} pts) on {trade.symbol}. "
-                            f"Dispatching broker execution..."
-                        )
-                        await self.approve_copilot_setup(trade.id, db=db)
+            import MetaTrader5 as mt5
+
+            for trade in pending_trades:
+                try:
+                    order_ticket = trade.order_ticket or trade.position_id
+                    sym = trade.symbol
+                    clean_sym = sym.rstrip("#")
+                    candidates = [sym, clean_sym, f"{clean_sym}#"]
+                    actual_sym = None
+                    tick = None
+
+                    for s in candidates:
+                        inf = mt5.symbol_info(s)
+                        if inf is not None:
+                            actual_sym = s
+                            tick = mt5.symbol_info_tick(s)
+                            break
+
+                    if not actual_sym or not tick:
+                        continue
+
+                    # Check if order is still resting in MT5 pending orders
+                    mt5_orders = mt5.orders_get(ticket=order_ticket)
+                    if mt5_orders and len(mt5_orders) > 0:
+                        sl_val = float(trade.sl)
+                        direction = trade.direction
+                        invalidated = False
+
+                        if direction == "BUY" and sl_val > 0 and tick.bid <= sl_val:
+                            invalidated = True
+                        elif direction == "SELL" and sl_val > 0 and tick.ask >= sl_val:
+                            invalidated = True
+
+                        if invalidated:
+                            logger.info(
+                                f"Invalidating resting {direction} limit #{order_ticket} on {sym}: "
+                                f"price breached SL {sl_val} before fill."
+                            )
+                            del_req = {
+                                "action": mt5.TRADE_ACTION_REMOVE,
+                                "order": order_ticket,
+                            }
+                            mt5.order_send(del_req)
+                            trade.status = "CANCELLED"
+                            trade.exit_reason = "STRUCTURE_INVALIDATED_BEFORE_FILL"
+                            db.commit()
+                            continue
+                    else:
+                        # Order not in pending orders: check if it became an open position
+                        positions = mt5.positions_get(ticket=order_ticket)
+                        if positions and len(positions) > 0:
+                            pos = positions[0]
+                            trade.status = "OPEN"
+                            trade.position_id = pos.ticket
+                            trade.entry_price = Decimal(str(pos.price_open))
+                            trade.opened_at_utc = now_utc()
+                            db.commit()
+                            logger.info(f"Resting limit #{order_ticket} filled on broker at {pos.price_open}! Position OPEN.")
+                            await manager.broadcast({
+                                "type": "POSITION_OPENED",
+                                "trade_id": trade.id,
+                                "symbol": sym,
+                                "ticket": pos.ticket,
+                                "direction": trade.direction,
+                                "lots": float(trade.lots),
+                                "entry_price": float(pos.price_open),
+                                "sl": float(trade.sl),
+                                "tp2": float(trade.tp2),
+                            })
+                        else:
+                            # Not found in orders or positions: expired or canceled on terminal
+                            trade.status = "CANCELLED"
+                            trade.exit_reason = "EXPIRED_OR_CANCELLED"
+                            db.commit()
                 except Exception as ex:
-                    logger.debug(f"Error checking auto-trigger for setup #{trade.id}: {ex}")
+                    logger.debug(f"Error monitoring pending order #{trade.id}: {ex}")
         except Exception as e:
-            logger.debug(f"Auto-trigger scan check exception: {e}")
+            logger.debug(f"Pending limit monitor exception: {e}")
 
     async def execute_pair_scan(
         self,
@@ -335,38 +389,22 @@ class LiveIntervalScheduler:
                     db.commit()
                     return report
 
-                # Route by mode
-                if exec_mode == "COPILOT":
-                    await self._stage_copilot_setup(
-                        report=report,
-                        symbol=symbol,
-                        mode=mode,
-                        magic=magic,
-                        direction=direction,
-                        lots=lots,
-                        entry=entry,
-                        sl=sl,
-                        tp1=tp1,
-                        tp2=tp2,
-                        account_type=active_account,
-                        db=db,
-                    )
-
-                elif exec_mode == "AUTO":
-                    await self._dispatch_auto_order(
-                        report=report,
-                        symbol=symbol,
-                        mode=mode,
-                        magic=magic,
-                        direction=direction,
-                        lots=lots,
-                        entry=entry,
-                        sl=sl,
-                        tp1=tp1,
-                        tp2=tp2,
-                        account_type=active_account,
-                        db=db,
-                    )
+                # Route by mode: Strictly Autonomous AUTO Execution (Market or Resting Limit)
+                await self._dispatch_auto_order(
+                    report=report,
+                    symbol=symbol,
+                    mode=mode,
+                    magic=magic,
+                    direction=direction,
+                    lots=lots,
+                    entry=entry,
+                    sl=sl,
+                    tp1=tp1,
+                    tp2=tp2,
+                    account_type=active_account,
+                    packet=packet,
+                    db=db,
+                )
 
             return report
         finally:
@@ -388,7 +426,7 @@ class LiveIntervalScheduler:
         account_type: str,
         db: Optional[Session] = None,
     ) -> None:
-        """Stage setup in TradeLedger with status PLANNED for 1-click UI confirmation."""
+        """Stage a PLANNED setup in TradeLedger (for manual/backward-compatible workflows)."""
         close_db = False
         if db is None:
             db = self._get_db()
@@ -398,11 +436,13 @@ class LiveIntervalScheduler:
             trade = TradeLedger(
                 account_type=account_type.upper(),
                 position_id=0,
+                order_ticket=0,
                 symbol=symbol,
                 magic_number=magic,
                 mode=mode,
                 direction=direction,
                 status="PLANNED",
+                entry_order_type="MARKET",
                 lots=Decimal(str(lots)),
                 initial_lots=Decimal(str(lots)),
                 entry_price=Decimal(str(entry)),
@@ -413,50 +453,10 @@ class LiveIntervalScheduler:
                 ai_analysis_summary=report.thesis_text,
             )
             db.add(trade)
-
-            rep = db.query(GeminiAnalysisReport).filter_by(id=report.id).first()
-            if rep:
-                rep.execution_status = "STAGED_COPILOT"
-
             db.commit()
-            db.refresh(trade)
-            trade_id = trade.id
         finally:
             if close_db:
                 db.close()
-
-        # Broadcast COPILOT_SETUP_READY to UI
-        await manager.broadcast({
-            "type": "COPILOT_SETUP_READY",
-            "trade_id": trade_id,
-            "report_id": report.id,
-            "symbol": symbol,
-            "mode": mode,
-            "direction": direction,
-            "lots": lots,
-            "entry_price": entry,
-            "sl": sl,
-            "tp1": tp1,
-            "tp2": tp2,
-            "thesis": report.thesis_text,
-            "timestamp_ist": to_ist_str(now_utc()),
-        })
-
-        # Alert Telegram
-        await telegram_service.broadcast_setup_alert({
-            "symbol": symbol,
-            "mode": mode,
-            "magic": magic,
-            "direction": direction,
-            "entry_price": entry,
-            "sl": sl,
-            "tp1": tp1,
-            "tp2": tp2,
-            "lots": lots,
-            "cash_risk": abs(entry - sl) * lots,
-            "ai_summary": report.thesis_text,
-        })
-        logger.info(f"COPILOT Mode: Staged setup #{trade_id} for {symbol}. Awaiting user approval.")
 
     async def _dispatch_auto_order(
         self,
@@ -471,21 +471,44 @@ class LiveIntervalScheduler:
         tp1: float,
         tp2: float,
         account_type: str,
+        packet: Optional[MarketPacket] = None,
         db: Optional[Session] = None,
     ) -> None:
-        """Dispatch live broker order via mt5_actor and persist OPEN TradeLedger row."""
-        logger.info(f"AUTO Mode: Dispatching live {direction} order for {symbol} ({lots} lots)...")
+        """
+        Autonomous execution engine:
+        1. Checks Anti-Chase Drift Guard: if live market price has drifted > 0.15 * ATR(14) away
+           from entry, converts execution into a resting BUY_LIMIT / SELL_LIMIT at entry.
+        2. Otherwise executes direct BUY_MARKET / SELL_MARKET via TRADE_ACTION_DEAL.
+        3. Saves TradeLedger with entry_order_type ("MARKET" vs "LIMIT"), detected_patterns_json,
+           hard SL, and dual TP.
+        """
+        logger.info(f"AUTO Mode: Processing {direction} order for {symbol} ({lots} lots)...")
 
         ticket = 0
         fill_price = entry
         final_sl = float(sl)
         final_tp = float(tp2)
+        is_limit_order = False
+
+        # Calculate ATR(14) from packet for drift detection
+        atr14 = 0.0
+        patterns_json = "[]"
+        if packet:
+            m15 = packet.timeframe_breakdown.get("M15") if hasattr(packet, "timeframe_breakdown") else None
+            if m15 and isinstance(m15, dict) and m15.get("atr14"):
+                atr14 = float(m15["atr14"])
+            if hasattr(packet, "detected_patterns") and packet.detected_patterns:
+                patterns_json = json.dumps(packet.detected_patterns)
+
+        if atr14 <= 0:
+            atr14 = 3.0 if "GOLD" in symbol.upper() else (300.0 if "BTC" in symbol.upper() else 0.0015)
 
         # Attempt live MT5 broker order send if connected
         if mt5_connector.is_connected:
             import MetaTrader5 as mt5
 
             def _send_order():
+                nonlocal is_limit_order
                 clean_sym = symbol.rstrip("#")
                 candidates = [symbol, clean_sym, f"{clean_sym}#"]
                 actual_sym = None
@@ -504,8 +527,18 @@ class LiveIntervalScheduler:
                 if not actual_sym or not tick or (tick.ask <= 0 and tick.bid <= 0):
                     return None, f"Could not obtain live quotes for '{symbol}' from MT5 broker."
 
+                digits = getattr(info, "digits", 2)
                 p = tick.ask if direction == "BUY" else tick.bid
-                order_type = mt5.ORDER_TYPE_BUY if direction == "BUY" else mt5.ORDER_TYPE_SELL
+
+                # Smart Anti-Chase Drift Guard
+                drift = abs(p - entry)
+                max_drift = 0.15 * atr14
+                if drift > max_drift:
+                    is_limit_order = True
+                    logger.info(
+                        f"Smart Anti-Chase Guard: Price drifted {drift:.4f} > {max_drift:.4f} (0.15*ATR) on {symbol}. "
+                        f"Converting from MARKET to resting LIMIT order at {entry}."
+                    )
 
                 filling = mt5.ORDER_FILLING_IOC
                 if info and hasattr(info, "filling_mode"):
@@ -517,7 +550,6 @@ class LiveIntervalScheduler:
                     else:
                         filling = mt5.ORDER_FILLING_RETURN
 
-                digits = getattr(info, "digits", 2)
                 cur_sl = float(sl)
                 cur_tp = float(tp2)
 
@@ -542,19 +574,38 @@ class LiveIntervalScheduler:
                 if hasattr(info, "volume_step") and info.volume_step > 0:
                     vol = round(vol / info.volume_step) * info.volume_step
 
-                req = {
-                    "action": mt5.TRADE_ACTION_DEAL,
-                    "symbol": actual_sym,
-                    "volume": float(vol),
-                    "type": order_type,
-                    "price": round(p, digits),
-                    "sl": round(cur_sl, digits),
-                    "tp": round(cur_tp, digits),
-                    "deviation": 20,
-                    "type_filling": filling,
-                    "magic": magic,
-                    "comment": f"AUTO_{mode}",
-                }
+                if is_limit_order:
+                    # Place Pending Limit Order
+                    order_type = mt5.ORDER_TYPE_BUY_LIMIT if direction == "BUY" else mt5.ORDER_TYPE_SELL_LIMIT
+                    req = {
+                        "action": mt5.TRADE_ACTION_PENDING,
+                        "symbol": actual_sym,
+                        "volume": float(vol),
+                        "type": order_type,
+                        "price": round(entry, digits),
+                        "sl": round(cur_sl, digits),
+                        "tp": round(cur_tp, digits),
+                        "type_filling": filling,
+                        "magic": magic,
+                        "comment": f"AUTO_LIMIT_{mode}",
+                    }
+                else:
+                    # Place Market Order
+                    order_type = mt5.ORDER_TYPE_BUY if direction == "BUY" else mt5.ORDER_TYPE_SELL
+                    req = {
+                        "action": mt5.TRADE_ACTION_DEAL,
+                        "symbol": actual_sym,
+                        "volume": float(vol),
+                        "type": order_type,
+                        "price": round(p, digits),
+                        "sl": round(cur_sl, digits),
+                        "tp": round(cur_tp, digits),
+                        "deviation": 20,
+                        "type_filling": filling,
+                        "magic": magic,
+                        "comment": f"AUTO_{mode}",
+                    }
+
                 try:
                     res = mt5.order_send(req)
                     return res, cur_sl, cur_tp
@@ -571,7 +622,7 @@ class LiveIntervalScheduler:
                 res, final_sl, final_tp = outcome
                 if res and res.retcode == 10009:  # TRADE_RETCODE_DONE
                     ticket = res.order
-                    fill_price = res.price
+                    fill_price = res.price if not is_limit_order else entry
                 else:
                     err_msg = res.comment if res else "Order send failed"
                     logger.error(f"AUTO Order failed on broker: {err_msg} (retcode: {getattr(res, 'retcode', 'N/A')})")
@@ -580,13 +631,15 @@ class LiveIntervalScheduler:
                 logger.error(f"AUTO Order failed on broker: {outcome}")
                 return
         else:
-            # Simulated offline execution ticket (strictly non-random, deterministic sequence)
             ticket = int(datetime.now(timezone.utc).timestamp() * 1000) % 100000000
 
         close_db = False
         if db is None:
             db = self._get_db()
             close_db = True
+
+        status_val = "PENDING" if is_limit_order else "OPEN"
+        entry_type_val = "LIMIT" if is_limit_order else "MARKET"
 
         try:
             trade = TradeLedger(
@@ -597,7 +650,9 @@ class LiveIntervalScheduler:
                 magic_number=magic,
                 mode=mode,
                 direction=direction,
-                status="OPEN",
+                status=status_val,
+                entry_order_type=entry_type_val,
+                detected_patterns_json=patterns_json,
                 lots=Decimal(str(lots)),
                 initial_lots=Decimal(str(lots)),
                 entry_price=Decimal(str(fill_price)),
@@ -611,12 +666,41 @@ class LiveIntervalScheduler:
 
             rep = db.query(GeminiAnalysisReport).filter_by(id=report.id).first()
             if rep:
-                rep.execution_status = "EXECUTED"
+                rep.execution_status = "EXECUTED" if not is_limit_order else "PENDING_LIMIT"
 
             db.commit()
+            trade_id = trade.id
         finally:
             if close_db:
                 db.close()
+
+        # Broadcast WebSocket event
+        if is_limit_order:
+            await manager.broadcast({
+                "type": "PENDING_ORDER_PLACED",
+                "trade_id": trade_id,
+                "order_ticket": ticket,
+                "symbol": symbol,
+                "direction": direction,
+                "order_type": f"{direction}_LIMIT",
+                "price": fill_price,
+                "sl": final_sl,
+                "tp2": final_tp,
+                "lots": lots,
+                "timestamp_ist": to_ist_str(now_utc()),
+            })
+        else:
+            await manager.broadcast({
+                "type": "POSITION_OPENED",
+                "trade_id": trade_id,
+                "symbol": symbol,
+                "ticket": ticket,
+                "direction": direction,
+                "lots": lots,
+                "entry_price": fill_price,
+                "sl": final_sl,
+                "tp2": final_tp,
+            })
 
         # Send Telegram Execution Alert
         await telegram_service.broadcast_trade_event(

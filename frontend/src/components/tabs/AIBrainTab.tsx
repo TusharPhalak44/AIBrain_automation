@@ -36,6 +36,7 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
   const [reports, setReports] = useState<any[]>([]);
   const [newsData, setNewsData] = useState<any>({ events: [], blackout_check: null });
   const [learnedRules, setLearnedRules] = useState<any[]>([]);
+  const [patternMemory, setPatternMemory] = useState<any[]>([]);
   const [globalInterval, setGlobalInterval] = useState<number>(300);
   const [isLoading, setIsLoading] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
@@ -131,17 +132,19 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
   const fetchBrainData = useCallback(async () => {
     setIsLoading(true);
     try {
-      const [repData, newsPayload, rulesData, upcomingPayload] = await Promise.all([
+      const [repData, newsPayload, rulesData, upcomingPayload, patternsPayload] = await Promise.all([
         api.ai.getReports({ limit: 20 }),
         api.ai.getNews(selectedSymbol),
         api.ai.getRules(),
         api.ai.getUpcomingSetups(),
+        api.ai.getPatternMemory(),
       ]);
 
       setReports(safeArr(repData));
       setNewsData(newsPayload || { events: [], blackout_check: null });
       setLearnedRules(safeArr(rulesData));
       setUpcomingData(upcomingPayload || { actionable_setups: [], watchlist_radar: [] });
+      setPatternMemory(safeArr(patternsPayload));
     } catch (e: any) {
       console.error("Failed to fetch AI supervisor data:", e);
     } finally {
@@ -165,17 +168,21 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
     return () => clearInterval(radarTimer);
   }, [fetchBrainData]);
 
-  const handleScanPair = async () => {
+  const handleScanSpecificPair = async (sym: string) => {
     setIsScanning(true);
     try {
-      const res = await api.ai.scanPair(selectedSymbol);
-      toast.success("Scan Complete", res.message || `${selectedSymbol} scanned by Gemini Supervisor.`);
+      const res = await api.ai.scanPair(sym);
+      toast.success("Scan Complete", res.message || `${sym} scanned by Gemini Supervisor.`);
       await fetchBrainData();
     } catch (e: any) {
       toast.error("Pair Scan Failed", e.message || String(e));
     } finally {
       setIsScanning(false);
     }
+  };
+
+  const handleScanPair = async () => {
+    await handleScanSpecificPair(selectedSymbol);
   };
 
   const handleScanAll = async () => {
@@ -253,15 +260,23 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
           </div>
         </div>
 
-        {/* Scan Triggers */}
-        <div className="flex items-center gap-2">
+        {/* Scan Triggers: GOLD#, BTCUSD#, Both */}
+        <div className="flex flex-wrap items-center gap-2">
           <button
             disabled={isScanning}
-            onClick={handleScanPair}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-lg text-xs shadow transition disabled:opacity-50"
+            onClick={() => handleScanSpecificPair("GOLD#")}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white font-bold rounded-lg text-xs shadow transition disabled:opacity-50"
           >
             <Zap className="w-3.5 h-3.5" />
-            <span>{isScanning ? "Scanning..." : `Scan ${selectedSymbol} Now`}</span>
+            <span>⚡ Scan GOLD#</span>
+          </button>
+          <button
+            disabled={isScanning}
+            onClick={() => handleScanSpecificPair("BTCUSD#")}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-orange-600 hover:bg-orange-500 text-white font-bold rounded-lg text-xs shadow transition disabled:opacity-50"
+          >
+            <Zap className="w-3.5 h-3.5" />
+            <span>⚡ Scan BTCUSD#</span>
           </button>
           <button
             disabled={isScanning}
@@ -269,7 +284,7 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
             className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold rounded-lg text-xs border border-slate-700 transition disabled:opacity-50"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isScanning ? "animate-spin" : ""}`} />
-            <span>Scan All Pairs</span>
+            <span>⚡ Scan Both Pairs</span>
           </button>
         </div>
       </div>
@@ -427,23 +442,15 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
                         "{setup.thesis || 'Algorithmic setup confirmed by Gemini Supervisor.'}"
                       </p>
 
-                      {/* Action Buttons */}
-                      <div className="flex gap-2 pt-1 border-t border-slate-800/60">
-                        <button
-                          disabled={actionLoading === setup.id}
-                          onClick={() => handleRejectCopilot(setup.id)}
-                          className="flex-1 py-1.5 bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white rounded-lg text-xs font-semibold border border-slate-800 transition"
-                        >
-                          Dismiss
-                        </button>
-                        <button
-                          disabled={actionLoading === setup.id}
-                          onClick={() => handleApproveCopilot(setup.id)}
-                          className="flex-2 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 shadow"
-                        >
-                          <CheckCircle className="w-3.5 h-3.5" />
-                          <span>{actionLoading === setup.id ? "Dispatching..." : "Approve & Enter Now (Market)"}</span>
-                        </button>
+                      {/* Autonomous Execution Status */}
+                      <div className="flex items-center justify-between text-[11px] bg-slate-900/80 px-3 py-1.5 rounded-lg border border-slate-800 text-slate-300">
+                        <span className="text-emerald-400 font-bold flex items-center gap-1.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
+                          <span>🟢 Auto-Armed Execution</span>
+                        </span>
+                        <span className="font-mono text-slate-400 text-[10px]">
+                          Anti-Chase Guard Active
+                        </span>
                       </div>
                     </div>
                   );
@@ -799,6 +806,98 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
             )}
           </div>
         </div>
+      </div>
+
+      {/* Per-Pair Pattern Win/Loss Memory (GOLD# vs BTCUSD#) */}
+      <div className="bg-[#121824] border border-slate-800 rounded-xl p-4 space-y-3">
+        <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+          <div className="flex items-center gap-2">
+            <Brain className="w-5 h-5 text-purple-400" />
+            <div>
+              <h3 className="font-bold text-white text-sm">PER-PAIR PATTERN WIN/LOSS MEMORY (GOLD# vs BTCUSD#)</h3>
+              <p className="text-[11px] text-slate-400">
+                Self-learning closed-loop pattern telemetry. Patterns with ≥60% win rate qualify as PROVEN_EDGE, while degraded setups are isolated as BLOCKED_TRAP.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={fetchBrainData}
+            className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded-lg"
+          >
+            Refresh Memory
+          </button>
+        </div>
+
+        {patternMemory.length === 0 ? (
+          <div className="text-slate-500 text-xs py-6 text-center">
+            No pattern memory records loaded yet.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs text-slate-300">
+              <thead className="bg-slate-900/80 text-[10px] text-slate-400 uppercase font-mono border-b border-slate-800">
+                <tr>
+                  <th className="py-2 px-3">Symbol</th>
+                  <th className="py-2 px-3">Pattern Signature</th>
+                  <th className="py-2 px-3">Mode</th>
+                  <th className="py-2 px-3">Trades (W/L)</th>
+                  <th className="py-2 px-3">Win Rate</th>
+                  <th className="py-2 px-3">Avg R:R</th>
+                  <th className="py-2 px-3">Net PnL</th>
+                  <th className="py-2 px-3">AI Edge Status</th>
+                  <th className="py-2 px-3">Last AI Lesson / Forensic Postmortem</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/60 font-mono text-[11px]">
+                {patternMemory.map((p) => {
+                  const isEdge = p.status === "PROVEN_EDGE";
+                  const isTrap = p.status === "BLOCKED_TRAP";
+                  return (
+                    <tr key={p.id} className="hover:bg-slate-900/40 transition">
+                      <td className="py-2.5 px-3 font-bold text-white font-sans">{p.symbol}</td>
+                      <td className="py-2.5 px-3 text-cyan-300 font-bold">{p.pattern_signature}</td>
+                      <td className="py-2.5 px-3 text-slate-400">{p.mode}</td>
+                      <td className="py-2.5 px-3 text-slate-200">
+                        {p.wins}W / {p.losses}L ({p.total_trades})
+                      </td>
+                      <td className={`py-2.5 px-3 font-bold ${
+                        p.win_rate_pct >= 60.0
+                          ? "text-emerald-400"
+                          : p.win_rate_pct <= 35.0
+                          ? "text-red-400"
+                          : "text-amber-300"
+                      }`}>
+                        {fmtPct(p.win_rate_pct)}
+                      </td>
+                      <td className="py-2.5 px-3 text-blue-300 font-bold">
+                        {p.avg_r_multiple > 0 ? `+${p.avg_r_multiple}R` : `${p.avg_r_multiple}R`}
+                      </td>
+                      <td className={`py-2.5 px-3 font-bold ${
+                        p.net_pnl_usd >= 0 ? "text-emerald-400" : "text-red-400"
+                      }`}>
+                        {p.net_pnl_usd >= 0 ? `+$${p.net_pnl_usd.toFixed(2)}` : `-$${Math.abs(p.net_pnl_usd).toFixed(2)}`}
+                      </td>
+                      <td className="py-2.5 px-3">
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                          isEdge
+                            ? "bg-emerald-950 text-emerald-400 border border-emerald-800"
+                            : isTrap
+                            ? "bg-red-950 text-red-400 border border-red-800 animate-pulse"
+                            : "bg-blue-950 text-blue-400 border border-blue-800"
+                        }`}>
+                          {p.status}
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-3 text-slate-300 font-sans max-w-md truncate" title={p.last_ai_lesson}>
+                        {p.last_ai_lesson}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </div>
   );

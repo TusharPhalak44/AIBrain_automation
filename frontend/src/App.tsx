@@ -157,6 +157,7 @@ const AppContent: React.FC = () => {
               isMt5Connected={store.isMt5Connected}
               executionMode={store.executionMode}
               openPositions={store.openPositions}
+              pendingOrders={store.pendingOrders}
               plannedTrades={store.plannedTrades}
               pairSchedules={store.pairSchedules}
               quotes={store.quotes}

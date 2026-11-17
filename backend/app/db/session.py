@@ -20,6 +20,7 @@ from backend.app.db.models import (
     MacroNewsEvent,
     GeminiModelRateCard,
     GeminiUsageLedger,
+    PairPatternMemory,
 )
 
 logger = logging.getLogger(__name__)
@@ -114,6 +115,22 @@ def init_db(bind_engine=None) -> None:
                     conn.commit()
                 except Exception:
                     pass
+            # strategy_scripts migrations
+            try:
+                conn.execute(text("ALTER TABLE strategy_scripts ADD COLUMN is_deleted BOOLEAN DEFAULT FALSE;"))
+                conn.commit()
+            except Exception:
+                pass
+            # trade_ledger migrations
+            for col, col_type in [
+                ("entry_order_type", "VARCHAR(16) DEFAULT 'MARKET'"),
+                ("detected_patterns_json", "TEXT NULL"),
+            ]:
+                try:
+                    conn.execute(text(f"ALTER TABLE trade_ledger ADD COLUMN {col} {col_type};"))
+                    conn.commit()
+                except Exception:
+                    pass
     except Exception as e:
         logger.debug(f"Column check passed or ignored: {e}")
 
@@ -125,7 +142,7 @@ def init_db(bind_engine=None) -> None:
             default_settings = AppSettings(
                 id=1,
                 active_account_type="DEMO",
-                execution_mode="MONITOR",
+                execution_mode="AUTO",
                 gemini_live_model="gemini-3.8-flash",
                 gemini_forensic_model="gemini-3.1-pro-preview",
                 global_scan_interval_sec=300,
@@ -134,8 +151,11 @@ def init_db(bind_engine=None) -> None:
             )
             session.add(default_settings)
         else:
-            # Auto-migrate retired gemini-2.5 models to Gemini 3.x
+            # Auto-migrate retired modes and models
             changed = False
+            if existing_settings.execution_mode in ["COPILOT", "MONITOR"]:
+                existing_settings.execution_mode = "AUTO"
+                changed = True
             if "gemini-2.5" in existing_settings.gemini_live_model:
                 existing_settings.gemini_live_model = "gemini-3.8-flash"
                 changed = True
@@ -173,15 +193,19 @@ def init_db(bind_engine=None) -> None:
                 )
             )
 
-        # Seed default XM Global pairs (strictly no Indian/US equity feeds)
+        # Purge non-Gold and non-BTC pairs from TradingPairBot table
+        try:
+            session.query(TradingPairBot).filter(
+                ~TradingPairBot.symbol.in_(["GOLD#", "BTCUSD#", "GOLD", "BTCUSD", "XAUUSD"])
+            ).delete(synchronize_session=False)
+            session.commit()
+        except Exception as pe:
+            logger.debug(f"Pair purge cleanup note: {pe}")
+
+        # Seed STRICT 2-Pair XM Global Focus: Gold & Bitcoin ONLY
         default_pairs = [
             ("GOLD#", "METAL", 35, 100.0, 0.01, 1.0, 2),
-            ("EURUSD#", "FOREX", 15, 100000.0, 0.00001, 1.0, 5),
-            ("GBPUSD#", "FOREX", 18, 100000.0, 0.00001, 1.0, 5),
-            ("USDJPY#", "FOREX", 16, 100000.0, 0.001, 0.67, 3),
             ("BTCUSD#", "CRYPTO", 45, 1.0, 0.01, 0.01, 2),
-            ("ETHUSD#", "CRYPTO", 40, 1.0, 0.01, 0.01, 2),
-            ("SOLUSD#", "CRYPTO", 50, 1.0, 0.01, 0.01, 2),
         ]
         for sym, aclass, max_spread, csize, tsize, tval, dig in default_pairs:
             pair = session.query(TradingPairBot).filter_by(symbol=sym).first()
@@ -198,6 +222,40 @@ def init_db(bind_engine=None) -> None:
                         tick_size=tsize,
                         tick_value=tval,
                         digits=dig,
+                    )
+                )
+            else:
+                pair.enabled = True
+                pair.scalp_enabled = True
+                pair.swing_enabled = True
+
+        # Seed default PairPatternMemory scorecard records if empty
+        existing_pm = session.query(PairPatternMemory).count()
+        if existing_pm == 0:
+            default_patterns = [
+                ("GOLD#", "SCALP", "LIQUIDITY_SWEEP_STOP_HUNT", "NY_OVERLAP"),
+                ("GOLD#", "SCALP", "FAIR_VALUE_GAP_RETEST", "LONDON_OPEN"),
+                ("GOLD#", "SWING", "MARKET_STRUCTURE_SHIFT_MSS", "ALL"),
+                ("GOLD#", "SWING", "SUPPLY_DEMAND_ORDER_BLOCK", "ALL"),
+                ("BTCUSD#", "SCALP", "VOLATILITY_SQUEEZE_BREAKOUT", "24/7"),
+                ("BTCUSD#", "SCALP", "LIQUIDITY_SWEEP_STOP_HUNT", "24/7"),
+                ("BTCUSD#", "SWING", "BREAK_OF_STRUCTURE_BOS", "CME_GAP_RETEST"),
+                ("BTCUSD#", "SWING", "FAIR_VALUE_GAP_RETEST", "24/7"),
+            ]
+            for p_sym, p_mode, p_sig, p_sess in default_patterns:
+                session.add(
+                    PairPatternMemory(
+                        symbol=p_sym,
+                        mode=p_mode,
+                        pattern_signature=p_sig,
+                        session_tag=p_sess,
+                        wins=0,
+                        losses=0,
+                        win_rate_pct=Decimal("0.00"),
+                        avg_r_multiple=Decimal("0.00"),
+                        net_pnl_usd=Decimal("0.00"),
+                        status="NEUTRAL",
+                        last_ai_lesson="Initialized default baseline for autonomous pattern tracking.",
                     )
                 )
 

@@ -198,6 +198,7 @@ class StrategyScript(Base):
     python_code: Mapped[str] = mapped_column(Text, nullable=False)
     default_params_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     is_builtin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at_utc: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_utc, nullable=False
     )
@@ -317,6 +318,10 @@ class TradeLedger(Base):
     )  # TP_HIT, SL_HIT, TRAIL_SL, MANUAL_MOBILE, KILL_SWITCH
 
     strategy_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    entry_order_type: Mapped[str] = mapped_column(
+        String(16), default="MARKET", nullable=False
+    )  # MARKET, LIMIT
+    detected_patterns_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     ai_analysis_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     loss_postmortem_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
@@ -325,6 +330,36 @@ class TradeLedger(Base):
     )
     closed_at_utc: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+
+
+class PairPatternMemory(Base):
+    """Per-pair price-action pattern scorecard and self-learning memory (GOLD# vs BTCUSD# isolated)."""
+
+    __tablename__ = "pair_pattern_memory"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, index=True)  # GOLD# or BTCUSD#
+    mode: Mapped[str] = mapped_column(String(16), default="SCALP", nullable=False)  # SCALP or SWING
+    pattern_signature: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    session_tag: Mapped[str] = mapped_column(String(32), default="ALL", nullable=False)
+    wins: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    losses: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    win_rate_pct: Mapped[Decimal] = mapped_column(
+        Numeric(5, 2), default=Decimal("0.00"), nullable=False
+    )
+    avg_r_multiple: Mapped[Decimal] = mapped_column(
+        Numeric(8, 2), default=Decimal("0.00"), nullable=False
+    )
+    net_pnl_usd: Mapped[Decimal] = mapped_column(
+        Numeric(14, 2), default=Decimal("0.00"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(
+        String(32), default="NEUTRAL", nullable=False
+    )  # PROVEN_EDGE, NEUTRAL, BLOCKED_TRAP
+    last_ai_lesson: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, nullable=False
     )
 
 

@@ -19,7 +19,7 @@ import {
   Layers,
 } from "lucide-react";
 import { fmtPrice, fmtUsd, fmtLots, safeArr } from "../../utils/format";
-import { OpenPosition, PlannedTrade, PairSchedule, QuoteData } from "../../hooks/useLiveStore";
+import { OpenPosition, PlannedTrade, PairSchedule, QuoteData, PendingOrder } from "../../hooks/useLiveStore";
 import { api } from "../../services/api";
 import { useToast } from "../Toast";
 
@@ -29,23 +29,19 @@ interface CockpitTabProps {
   isMt5Connected: boolean;
   executionMode?: string;
   openPositions: OpenPosition[];
-  plannedTrades: PlannedTrade[];
+  pendingOrders?: PendingOrder[];
+  plannedTrades?: PlannedTrade[];
   pairSchedules: Record<string, PairSchedule>;
   quotes?: Record<string, QuoteData>;
   onSelectSymbol: (symbol: string) => void;
   onSelectTimeframe: (tf: string) => void;
-  onApproveCopilot: (tradeId: number) => Promise<any>;
-  onRejectCopilot: (tradeId: number) => Promise<any>;
+  onApproveCopilot?: (tradeId: number) => Promise<any>;
+  onRejectCopilot?: (tradeId: number) => Promise<any>;
 }
 
 const XM_SYMBOLS = [
   { symbol: "GOLD#", name: "Gold (Spot USD)", class: "METALS" },
-  { symbol: "EURUSD#", name: "EUR / USD", class: "FOREX" },
-  { symbol: "GBPUSD#", name: "GBP / USD", class: "FOREX" },
-  { symbol: "USDJPY#", name: "USD / JPY", class: "FOREX" },
-  { symbol: "BTCUSD#", name: "Bitcoin CFD", class: "CRYPTO" },
-  { symbol: "ETHUSD#", name: "Ethereum CFD", class: "CRYPTO" },
-  { symbol: "SOLUSD#", name: "Solana CFD", class: "CRYPTO" },
+  { symbol: "BTCUSD#", name: "Bitcoin CFD (24/7)", class: "CRYPTO" },
 ];
 
 const TIMEFRAMES = ["M1", "M5", "M15", "H1", "H4", "D1"];
@@ -56,7 +52,8 @@ export const CockpitTab: React.FC<CockpitTabProps> = ({
   isMt5Connected,
   executionMode = "AUTO",
   openPositions,
-  plannedTrades,
+  pendingOrders = [],
+  plannedTrades = [],
   pairSchedules,
   quotes = {},
   onSelectSymbol,
@@ -73,6 +70,7 @@ export const CockpitTab: React.FC<CockpitTabProps> = ({
   const [chartStatus, setChartStatus] = useState<string>("OK");
   const [candleCount, setCandleCount] = useState<number>(0);
   const [overlays, setOverlays] = useState<any>({});
+  const [bottomTab, setBottomTab] = useState<"POSITIONS" | "LIMITS">("POSITIONS");
   const [actionLoading, setActionLoading] = useState<number | null>(null);
   const toast = useToast();
 
@@ -205,6 +203,7 @@ export const CockpitTab: React.FC<CockpitTabProps> = ({
   }, [selectedSymbol, selectedTimeframe, isMt5Connected]);
 
   const handleApprove = async (id: number) => {
+    if (!onApproveCopilot) return;
     setActionLoading(id);
     try {
       const res = await onApproveCopilot(id);
@@ -217,6 +216,7 @@ export const CockpitTab: React.FC<CockpitTabProps> = ({
   };
 
   const handleReject = async (id: number) => {
+    if (!onRejectCopilot) return;
     setActionLoading(id);
     try {
       await onRejectCopilot(id);
@@ -356,159 +356,138 @@ export const CockpitTab: React.FC<CockpitTabProps> = ({
           </div>
         </div>
 
-        {/* Bottom: Positions & Copilot Staging Cards (Fixed height) */}
-        <div className="h-48 bg-[#121824] border border-slate-800 rounded-xl flex flex-col overflow-hidden">
+        {/* Bottom: Active Positions & Resting MT5 Limit Orders */}
+        <div className="h-52 bg-[#121824] border border-slate-800 rounded-xl flex flex-col overflow-hidden">
           {/* Header tabs */}
           <div className="px-3 py-1.5 border-b border-slate-800 bg-[#0E131D] flex items-center justify-between text-xs font-bold text-slate-300">
-            <div className="flex items-center gap-4">
-              <span className="flex items-center gap-1.5 text-blue-400">
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setBottomTab("POSITIONS")}
+                className={`flex items-center gap-1.5 px-3 py-1 rounded transition ${
+                  bottomTab === "POSITIONS"
+                    ? "bg-blue-600/20 text-blue-400 border border-blue-500/30"
+                    : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
                 <Layers className="w-3.5 h-3.5" />
                 <span>Open Positions ({openPositions.length})</span>
-              </span>
-              {plannedTrades.length > 0 && (
-                <span className="text-amber-400">
-                  Pending Setups ({plannedTrades.length})
-                </span>
-              )}
+              </button>
+
+              <button
+                onClick={() => setBottomTab("LIMITS")}
+                className={`flex items-center gap-1.5 px-3 py-1 rounded transition ${
+                  bottomTab === "LIMITS"
+                    ? "bg-amber-600/20 text-amber-400 border border-amber-500/30"
+                    : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                <Clock className="w-3.5 h-3.5" />
+                <span>Resting Limits ({pendingOrders.length})</span>
+              </button>
             </div>
-            {executionMode === "AUTO" ? (
-              <span className="flex items-center gap-1.5 text-[10px] font-bold text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-800/60">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
-                <span>AUTO-EXECUTION ACTIVE (Direct MT5 Order Placement)</span>
-              </span>
-            ) : null}
+
+            <span className="flex items-center gap-1.5 text-[10px] font-bold text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-800/60">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
+              <span>PURE AUTO (24/7 Autonomous Market + Limit)</span>
+            </span>
           </div>
 
           {/* Body Content */}
           <div className="flex-1 overflow-y-auto p-2">
-            {plannedTrades.length > 0 && (
-              <div className="mb-3 space-y-1.5">
-                <div className="flex items-center justify-between px-1">
-                  <div className="text-[10px] text-amber-400 font-bold uppercase tracking-wider flex items-center gap-1.5">
-                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-                    <span>
-                      {executionMode === "AUTO"
-                        ? "⚡ AUTO-EXECUTE ARMED: Direct broker order on price trigger zone"
-                        : "🎯 COPILOT RADAR: Auto-triggers in zone or execute instantly below"}
-                    </span>
-                  </div>
-                  <span className="text-[10px] text-slate-400 font-mono">
-                    {plannedTrades.length} Setup{plannedTrades.length > 1 ? "s" : ""}
-                  </span>
+            {bottomTab === "POSITIONS" ? (
+              openPositions.length === 0 ? (
+                <div className="h-full flex items-center justify-center text-slate-500 text-xs">
+                  No active open positions on MT5 broker.
                 </div>
-                {plannedTrades.map((t) => (
-                  <div
-                    key={t.id}
-                    className="p-2.5 rounded-lg bg-amber-950/20 border border-amber-500/30 flex flex-wrap items-center justify-between gap-2"
-                  >
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="font-bold text-slate-100 text-xs">{t.symbol}</span>
-                        <span
-                          className={`text-[10px] font-bold px-1.5 py-0.2 rounded ${
-                            t.direction === "BUY"
-                              ? "bg-emerald-950 text-emerald-400 border border-emerald-800"
-                              : "bg-red-950 text-red-400 border border-red-800"
-                          }`}
-                        >
-                          {t.direction} {t.mode}
-                        </span>
-                        <span className="text-[10px] text-slate-400 font-mono">
-                          {fmtLots(t.lots)} Lots
-                        </span>
-                        <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-950/60 text-emerald-300 border border-emerald-800/60 font-semibold">
-                          ⚡ Auto-Trigger Armed
-                        </span>
-                      </div>
-                      <div className="text-[10px] text-slate-300 mt-1 flex gap-3 font-mono">
-                        <span>Entry: {fmtPrice(t.entry_price)}</span>
-                        <span>SL: {fmtPrice(t.sl)}</span>
-                        <span>TP1: {fmtPrice(t.tp1)}</span>
-                        <span>TP2: {fmtPrice(t.tp2)}</span>
-                      </div>
-                      {t.ai_analysis_summary && (
-                        <div className="text-[10px] text-amber-200/80 mt-1 max-w-xl truncate">
-                          {t.ai_analysis_summary}
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      <button
-                        disabled={actionLoading === t.id}
-                        onClick={() => handleReject(t.id)}
-                        className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded transition"
-                      >
-                        Dismiss
-                      </button>
-                      <button
-                        disabled={actionLoading === t.id}
-                        onClick={() => handleApprove(t.id)}
-                        className="flex items-center gap-1.5 px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded shadow transition"
-                      >
-                        <CheckCircle2 className="w-3.5 h-3.5" />
-                        <span>{actionLoading === t.id ? "Dispatching..." : (executionMode === "AUTO" ? "⚡ Enter Now (Market)" : "Approve & Enter")}</span>
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* Positions Table */}
-            {openPositions.length === 0 && plannedTrades.length === 0 ? (
-              <div className="h-full flex items-center justify-center text-slate-500 text-xs">
-                No active positions or pending setups.
-              </div>
-            ) : openPositions.length > 0 ? (
-              <table className="w-full text-left text-xs text-slate-300 font-mono">
-                <thead>
-                  <tr className="border-b border-slate-800 text-[10px] text-slate-500 uppercase">
-                    <th className="pb-1">Ticket</th>
-                    <th className="pb-1">Symbol</th>
-                    <th className="pb-1">Type</th>
-                    <th className="pb-1">Volume</th>
-                    <th className="pb-1">Open Price</th>
-                    <th className="pb-1">Current</th>
-                    <th className="pb-1">SL</th>
-                    <th className="pb-1">TP</th>
-                    <th className="pb-1 text-right">PnL (USD)</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800/40">
-                  {openPositions.map((pos) => {
-                    const isBuy = pos.type === 0;
-                    return (
-                      <tr key={pos.ticket} className="hover:bg-slate-900/40">
-                        <td className="py-1 text-slate-400">#{pos.ticket}</td>
-                        <td className="py-1 font-bold text-white">{pos.symbol}</td>
-                        <td className="py-1">
-                          <span
-                            className={`px-1 py-0.2 rounded text-[10px] font-bold ${
-                              isBuy ? "text-emerald-400" : "text-red-400"
+              ) : (
+                <table className="w-full text-left text-xs text-slate-300 font-mono">
+                  <thead>
+                    <tr className="border-b border-slate-800 text-[10px] text-slate-500 uppercase">
+                      <th className="pb-1">Ticket</th>
+                      <th className="pb-1">Symbol</th>
+                      <th className="pb-1">Type</th>
+                      <th className="pb-1">Volume</th>
+                      <th className="pb-1">Open Price</th>
+                      <th className="pb-1">Current</th>
+                      <th className="pb-1">SL</th>
+                      <th className="pb-1">TP</th>
+                      <th className="pb-1 text-right">PnL (USD)</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/40">
+                    {openPositions.map((pos) => {
+                      const isBuy = pos.type === 0;
+                      return (
+                        <tr key={pos.ticket} className="hover:bg-slate-900/40">
+                          <td className="py-1 text-slate-400">#{pos.ticket}</td>
+                          <td className="py-1 font-bold text-white">{pos.symbol}</td>
+                          <td className="py-1">
+                            <span
+                              className={`px-1 py-0.2 rounded text-[10px] font-bold ${
+                                isBuy ? "text-emerald-400" : "text-red-400"
+                              }`}
+                            >
+                              {isBuy ? "BUY" : "SELL"}
+                            </span>
+                          </td>
+                          <td className="py-1">{fmtLots(pos.volume)}</td>
+                          <td className="py-1">{fmtPrice(pos.price_open)}</td>
+                          <td className="py-1">{fmtPrice(pos.price_current)}</td>
+                          <td className="py-1 text-red-400">{fmtPrice(pos.sl)}</td>
+                          <td className="py-1 text-emerald-400">{fmtPrice(pos.tp)}</td>
+                          <td
+                            className={`py-1 text-right font-bold ${
+                              pos.profit >= 0 ? "text-emerald-400" : "text-red-400"
                             }`}
                           >
-                            {isBuy ? "BUY" : "SELL"}
+                            {fmtUsd(pos.profit, true)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )
+            ) : (
+              pendingOrders.length === 0 ? (
+                <div className="h-full flex items-center justify-center text-slate-500 text-xs">
+                  No resting limit orders on MT5 broker.
+                </div>
+              ) : (
+                <table className="w-full text-left text-xs text-slate-300 font-mono">
+                  <thead>
+                    <tr className="border-b border-slate-800 text-[10px] text-slate-500 uppercase">
+                      <th className="pb-1">Ticket</th>
+                      <th className="pb-1">Symbol</th>
+                      <th className="pb-1">Order Type</th>
+                      <th className="pb-1">Volume</th>
+                      <th className="pb-1">Limit Price</th>
+                      <th className="pb-1">Stop Loss</th>
+                      <th className="pb-1">Take Profit</th>
+                      <th className="pb-1">Comment</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/40">
+                    {pendingOrders.map((ord) => (
+                      <tr key={ord.ticket} className="hover:bg-slate-900/40">
+                        <td className="py-1 text-slate-400">#{ord.ticket}</td>
+                        <td className="py-1 font-bold text-white">{ord.symbol}</td>
+                        <td className="py-1">
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-950/80 text-amber-300 border border-amber-800/60">
+                            {ord.type_desc || "LIMIT"}
                           </span>
                         </td>
-                        <td className="py-1">{fmtLots(pos.volume)}</td>
-                        <td className="py-1">{fmtPrice(pos.price_open)}</td>
-                        <td className="py-1">{fmtPrice(pos.price_current)}</td>
-                        <td className="py-1 text-red-400">{fmtPrice(pos.sl)}</td>
-                        <td className="py-1 text-emerald-400">{fmtPrice(pos.tp)}</td>
-                        <td
-                          className={`py-1 text-right font-bold ${
-                            pos.profit >= 0 ? "text-emerald-400" : "text-red-400"
-                          }`}
-                        >
-                          {fmtUsd(pos.profit, true)}
-                        </td>
+                        <td className="py-1">{fmtLots(ord.volume)}</td>
+                        <td className="py-1 text-amber-300 font-bold">{fmtPrice(ord.price_open)}</td>
+                        <td className="py-1 text-red-400">{fmtPrice(ord.sl)}</td>
+                        <td className="py-1 text-emerald-400">{fmtPrice(ord.tp)}</td>
+                        <td className="py-1 text-slate-400 truncate max-w-[150px]">{ord.comment || "AUTO_LIMIT"}</td>
                       </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            ) : null}
+                    ))}
+                  </tbody>
+                </table>
+              )
+            )}
           </div>
         </div>
       </div>

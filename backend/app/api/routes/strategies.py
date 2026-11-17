@@ -59,8 +59,13 @@ class AssignStrategySchema(BaseModel):
 
 @router.get("")
 def list_strategies(db: Session = Depends(get_db)):
-    """List all available strategies (built-in and custom)."""
-    strategies = db.query(StrategyScript).order_by(StrategyScript.is_builtin.desc(), StrategyScript.id.asc()).all()
+    """List all available strategies (built-in and custom, excluding deleted)."""
+    strategies = (
+        db.query(StrategyScript)
+        .filter((StrategyScript.is_deleted == False) | (StrategyScript.is_deleted.is_(None)))
+        .order_by(StrategyScript.is_builtin.desc(), StrategyScript.id.asc())
+        .all()
+    )
     res = []
     for s in strategies:
         params = json.loads(s.default_params_json) if s.default_params_json else {}
@@ -149,16 +154,77 @@ def update_strategy(strategy_id: int, payload: StrategyUpdateSchema, db: Session
 
 @router.delete("/{strategy_id}")
 def delete_strategy(strategy_id: int, db: Session = Depends(get_db)):
-    """Delete a custom strategy (built-in strategies are protected)."""
+    """
+    Delete any strategy (custom or built-in).
+    Unassigns from TradingPairBot, unlinks BacktestRun, and marks is_deleted=True
+    so startup boot will not revive it.
+    """
     script = db.query(StrategyScript).filter_by(id=strategy_id).first()
     if not script:
         raise HTTPException(status_code=404, detail="Strategy not found")
-    if script.is_builtin:
-        raise HTTPException(status_code=403, detail="Built-in starter strategies cannot be deleted.")
 
-    db.delete(script)
+    # 1. Unassign from any TradingPairBot
+    db.query(TradingPairBot).filter(TradingPairBot.scalp_strategy_id == strategy_id).update(
+        {TradingPairBot.scalp_strategy_id: None}
+    )
+    db.query(TradingPairBot).filter(TradingPairBot.swing_strategy_id == strategy_id).update(
+        {TradingPairBot.swing_strategy_id: None}
+    )
+
+    # 2. Unlink from BacktestRun foreign keys to maintain referential integrity
+    db.query(BacktestRun).filter(BacktestRun.strategy_id == strategy_id).update(
+        {BacktestRun.strategy_id: None}
+    )
+
+    # 3. Soft-delete flag so built-ins or custom strategies are hidden and not auto-recreated
+    script.is_deleted = True
     db.commit()
-    return {"status": "SUCCESS", "message": f"Strategy #{strategy_id} deleted"}
+    return {"status": "SUCCESS", "message": f"Strategy #{strategy_id} ('{script.name}') deleted successfully."}
+
+
+@router.post("/restore-defaults")
+def restore_default_strategies(db: Session = Depends(get_db)):
+    """Restore starter templates on demand."""
+    from backend.app.strategy_lab.builtin_strategies import BUILTIN_STRATEGIES
+
+    restored_count = 0
+    for strat in BUILTIN_STRATEGIES:
+        existing = db.query(StrategyScript).filter_by(name=strat["name"]).first()
+        if existing:
+            existing.is_deleted = False
+            existing.python_code = strat["python_code"]
+            existing.default_params_json = strat["default_params_json"]
+            existing.description = strat["description"]
+            existing.target_mode = strat["target_mode"]
+            existing.is_builtin = True
+            restored_count += 1
+        else:
+            new_strat = StrategyScript(
+                name=strat["name"],
+                description=strat["description"],
+                target_mode=strat["target_mode"],
+                python_code=strat["python_code"],
+                default_params_json=strat["default_params_json"],
+                is_builtin=True,
+                is_deleted=False,
+                created_at_utc=now_utc(),
+            )
+            db.add(new_strat)
+            restored_count += 1
+
+    db.commit()
+    return {"status": "SUCCESS", "restored_count": restored_count, "message": f"Restored {restored_count} starter strategy templates."}
+
+
+@router.delete("/backtests/{run_id}")
+def delete_backtest_run(run_id: int, db: Session = Depends(get_db)):
+    """Delete an individual backtest run from historical records."""
+    run = db.query(BacktestRun).filter_by(id=run_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Backtest run not found")
+    db.delete(run)
+    db.commit()
+    return {"status": "SUCCESS", "message": f"Backtest run #{run_id} deleted"}
 
 
 @router.post("/backtest")

@@ -171,6 +171,38 @@ class MT5Connector:
 
         return await mt5_actor.execute(PriorityLevel.P1_POSITIONS, _query)
 
+    async def get_pending_orders(self) -> List[Dict[str, Any]]:
+        """Query currently active resting limit and stop orders on MT5."""
+        import MetaTrader5 as mt5
+
+        def _query_orders():
+            orders = mt5.orders_get()
+            if orders is None:
+                return []
+            res = []
+            for o in orders:
+                otype = "BUY_LIMIT" if o.type == mt5.ORDER_TYPE_BUY_LIMIT else (
+                    "SELL_LIMIT" if o.type == mt5.ORDER_TYPE_SELL_LIMIT else (
+                        "BUY_STOP" if o.type == mt5.ORDER_TYPE_BUY_STOP else "SELL_STOP"
+                    )
+                )
+                res.append({
+                    "ticket": o.ticket,
+                    "symbol": o.symbol,
+                    "type": otype,
+                    "magic": o.magic,
+                    "volume": float(o.volume_initial),
+                    "price_open": float(o.price_open),
+                    "sl": float(o.sl),
+                    "tp": float(o.tp),
+                    "time_setup": int(o.time_setup),
+                    "time_expiration": int(o.time_expiration),
+                    "comment": str(o.comment or ""),
+                })
+            return res
+
+        return await mt5_actor.execute(PriorityLevel.P1_POSITIONS, _query_orders)
+
     async def emergency_flatten_all(self) -> Tuple[int, List[str]]:
         """Emergency panic close for all open positions across all symbols."""
         import MetaTrader5 as mt5
@@ -208,6 +240,20 @@ class MT5Connector:
                 else:
                     err_msg = res.comment if res else str(mt5.last_error())
                     errors.append(f"Failed to close #{pos.ticket}: {err_msg}")
+
+            # Cancel all resting pending orders (BUY_LIMIT, SELL_LIMIT, etc.)
+            pending_orders = mt5.orders_get()
+            if pending_orders:
+                for o in pending_orders:
+                    cancel_req = {
+                        "action": mt5.TRADE_ACTION_REMOVE,
+                        "order": o.ticket,
+                    }
+                    c_res = mt5.order_send(cancel_req)
+                    if c_res and c_res.retcode == mt5.TRADE_RETCODE_DONE:
+                        closed_count += 1
+                    else:
+                        errors.append(f"Failed to cancel pending #{o.ticket}")
 
             return closed_count, errors
 

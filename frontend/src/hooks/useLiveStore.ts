@@ -30,6 +30,19 @@ export interface PlannedTrade {
   opened_at_ist?: string;
 }
 
+export interface PendingOrder {
+  ticket: number;
+  symbol: string;
+  type: number;
+  type_desc: string;
+  volume: number;
+  price_open: number;
+  sl: number;
+  tp: number;
+  magic: number;
+  comment: string;
+}
+
 export interface PairSchedule {
   interval_sec: number;
   last_scan_ist?: string;
@@ -51,7 +64,7 @@ export interface QuoteData {
 export function useLiveStore() {
   const [isWsConnected, setIsWsConnected] = useState(false);
   const [accountType, setAccountType] = useState<string>("DEMO");
-  const [executionMode, setExecutionMode] = useState<string>("COPILOT");
+  const [executionMode, setExecutionMode] = useState<string>("AUTO");
   const [isMt5Connected, setIsMt5Connected] = useState(false);
   const [dbHealthy, setDbHealthy] = useState(true);
 
@@ -65,6 +78,7 @@ export function useLiveStore() {
   const [todayClosedNetPnl, setTodayClosedNetPnl] = useState(0.0);
 
   const [openPositions, setOpenPositions] = useState<OpenPosition[]>([]);
+  const [pendingOrders, setPendingOrders] = useState<PendingOrder[]>([]);
   const [plannedTrades, setPlannedTrades] = useState<PlannedTrade[]>([]);
   const [pairSchedules, setPairSchedules] = useState<Record<string, PairSchedule>>({});
   const [quotes, setQuotes] = useState<Record<string, QuoteData>>({});
@@ -90,6 +104,7 @@ export function useLiveStore() {
     if (typeof data.floating_pnl === "number") setFloatingPnl(data.floating_pnl);
     if (typeof data.today_closed_net_pnl === "number") setTodayClosedNetPnl(data.today_closed_net_pnl);
     if (data.open_positions) setOpenPositions(safeArr(data.open_positions));
+    if (data.pending_orders) setPendingOrders(safeArr(data.pending_orders));
     if (data.planned_trades) setPlannedTrades(safeArr(data.planned_trades));
     if (data.pair_schedules) setPairSchedules(data.pair_schedules);
     if (data.quotes && typeof data.quotes === "object") setQuotes(data.quotes);
@@ -206,6 +221,7 @@ export function useLiveStore() {
     floatingPnl,
     todayClosedNetPnl,
     openPositions,
+    pendingOrders,
     plannedTrades,
     pairSchedules,
     quotes,

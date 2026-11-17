@@ -235,22 +235,18 @@ export const TopCommandBar: React.FC<TopCommandBarProps> = ({
           </button>
         </div>
 
-        {/* Execution Mode */}
+        {/* Execution Mode: Strictly AUTO vs PAUSED/HALTED */}
         <select
-          value={executionMode}
+          value={executionMode === "HALTED" ? "HALTED" : "AUTO"}
           onChange={(e) => onSwitchMode(e.target.value)}
           className={`border text-xs rounded-lg px-2.5 py-1 font-bold focus:outline-none transition ${
             executionMode === "AUTO"
               ? "bg-emerald-950/80 border-emerald-500/60 text-emerald-300 shadow-sm shadow-emerald-950"
-              : executionMode === "COPILOT"
-              ? "bg-blue-950/80 border-blue-500/60 text-blue-300"
-              : "bg-slate-900 border-slate-800 text-slate-300"
+              : "bg-amber-950/80 border-amber-500/60 text-amber-300"
           }`}
         >
-          <option value="AUTO">⚡ AUTO (Direct / Instant Order)</option>
-          <option value="COPILOT">✋ COPILOT (1-Click Approve)</option>
-          <option value="MONITOR">👁️ MONITOR (Observer Only)</option>
-          <option value="HALTED">🛑 HALTED</option>
+          <option value="AUTO">🟢 AUTO (24/7 Autonomous Market + Limit)</option>
+          <option value="HALTED">⏸️ PAUSED / HALTED</option>
         </select>
 
         {/* Emergency Panic Flatten Button */}

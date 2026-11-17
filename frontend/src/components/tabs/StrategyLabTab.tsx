@@ -56,6 +56,9 @@ export const StrategyLabTab: React.FC<StrategyLabTabProps> = ({
   const [isSavingSnapshot, setIsSavingSnapshot] = useState(false);
   const [snapshotLabel, setSnapshotLabel] = useState("");
   const [showSaveModal, setShowSaveModal] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [isDeletingStrategy, setIsDeletingStrategy] = useState(false);
+  const [isRestoringDefaults, setIsRestoringDefaults] = useState(false);
 
   useEffect(() => {
     fetchStrategies();
@@ -132,6 +135,35 @@ export const StrategyLabTab: React.FC<StrategyLabTabProps> = ({
       fetchStrategies();
     } catch (e: any) {
       toast.error("Save Failed", e.message || String(e));
+    }
+  };
+
+  const handleDeleteStrategy = async () => {
+    if (!selectedStrategyId) return;
+    setIsDeletingStrategy(true);
+    try {
+      await api.strategies.delete(selectedStrategyId);
+      toast.success("Strategy Deleted", `Strategy #${selectedStrategyId} removed.`);
+      setShowDeleteConfirm(false);
+      setSelectedStrategyId(null);
+      await fetchStrategies();
+    } catch (e: any) {
+      toast.error("Delete Failed", e.message || String(e));
+    } finally {
+      setIsDeletingStrategy(false);
+    }
+  };
+
+  const handleRestoreDefaults = async () => {
+    setIsRestoringDefaults(true);
+    try {
+      const res = await api.strategies.restoreDefaults();
+      toast.success("Templates Restored", res.message || "Default starter strategies restored.");
+      await fetchStrategies();
+    } catch (e: any) {
+      toast.error("Restore Failed", e.message || String(e));
+    } finally {
+      setIsRestoringDefaults(false);
     }
   };
 
@@ -269,7 +301,7 @@ export const StrategyLabTab: React.FC<StrategyLabTabProps> = ({
               <span className="font-bold text-white text-sm">PYTHON STRATEGY SANDBOX</span>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <select
                 value={selectedStrategyId || ""}
                 onChange={(e) => handleSelectStrategy(Number(e.target.value))}
@@ -282,6 +314,25 @@ export const StrategyLabTab: React.FC<StrategyLabTabProps> = ({
                   </option>
                 ))}
               </select>
+
+              <button
+                onClick={() => setShowDeleteConfirm(true)}
+                disabled={!selectedStrategyId}
+                className="flex items-center gap-1 px-2.5 py-1 bg-red-950/60 hover:bg-red-900 border border-red-800 text-red-400 font-bold rounded-lg text-xs transition disabled:opacity-50"
+                title="Delete Strategy"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Delete</span>
+              </button>
+
+              <button
+                onClick={handleRestoreDefaults}
+                disabled={isRestoringDefaults}
+                className="flex items-center gap-1 px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold rounded-lg text-xs transition disabled:opacity-50"
+                title="Restore Default Starter Templates"
+              >
+                <span>{isRestoringDefaults ? "Restoring..." : "🔄 Restore Templates"}</span>
+              </button>
             </div>
           </div>
 
@@ -374,15 +425,10 @@ export const StrategyLabTab: React.FC<StrategyLabTabProps> = ({
               <select
                 value={backtestSymbol}
                 onChange={(e) => setBacktestSymbol(e.target.value)}
-                className="w-full bg-slate-900 border border-slate-800 text-slate-100 rounded-lg px-2 py-1.5"
+                className="w-full bg-slate-900 border border-slate-800 text-slate-100 rounded-lg px-2 py-1.5 font-bold"
               >
-                <option value="GOLD#">GOLD#</option>
-                <option value="EURUSD#">EURUSD#</option>
-                <option value="GBPUSD#">GBPUSD#</option>
-                <option value="USDJPY#">USDJPY#</option>
-                <option value="BTCUSD#">BTCUSD#</option>
-                <option value="ETHUSD#">ETHUSD#</option>
-                <option value="SOLUSD#">SOLUSD#</option>
+                <option value="GOLD#">GOLD# (Spot Gold)</option>
+                <option value="BTCUSD#">BTCUSD# (Bitcoin CFD)</option>
               </select>
             </div>
 
@@ -568,6 +614,36 @@ export const StrategyLabTab: React.FC<StrategyLabTabProps> = ({
                 className="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-bold shadow"
               >
                 {isSavingSnapshot ? "Saving..." : "Save to Vault"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Strategy Confirmation Modal */}
+      {showDeleteConfirm && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+          <div className="bg-[#121824] border border-red-800/80 rounded-xl max-w-sm w-full p-4 space-y-3">
+            <h4 className="font-bold text-white text-sm flex items-center gap-2 text-red-400">
+              <Trash2 className="w-4 h-4" />
+              <span>Confirm Strategy Deletion</span>
+            </h4>
+            <p className="text-xs text-slate-300">
+              Are you sure you want to delete strategy <strong className="text-white font-mono">"{strategyName}"</strong>? This will unassign it from active pair bots and unlink historical backtest runs.
+            </p>
+            <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
+              <button
+                onClick={() => setShowDeleteConfirm(false)}
+                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-semibold"
+              >
+                Cancel
+              </button>
+              <button
+                disabled={isDeletingStrategy}
+                onClick={handleDeleteStrategy}
+                className="px-4 py-1.5 bg-red-600 hover:bg-red-500 text-white rounded-lg text-xs font-bold shadow"
+              >
+                {isDeletingStrategy ? "Deleting..." : "Yes, Delete Strategy"}
               </button>
             </div>
           </div>

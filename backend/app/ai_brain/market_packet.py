@@ -32,21 +32,17 @@ from backend.app.strategy_lab.indicators import (
     swing_lows,
     detect_fvg,
     detect_liquidity_sweep,
+    scan_all_price_action_patterns,
 )
 from backend.app.strategy_lab.sandbox import StrategySandbox
 from backend.app.ai_brain.news_guard import news_guard, NewsBlackoutResult
 
 logger = logging.getLogger(__name__)
 
-# Primary active XM Global instruments
+# Strict 2-Pair Focus: Gold & Bitcoin ONLY
 XM_ACTIVE_SYMBOLS = [
     "GOLD#",
-    "EURUSD#",
-    "GBPUSD#",
-    "USDJPY#",
     "BTCUSD#",
-    "ETHUSD#",
-    "SOLUSD#",
 ]
 
 TIMEFRAME_MAP = {
@@ -73,6 +69,7 @@ class TimeframeAnalysis:
     key_lows: List[float] = field(default_factory=list)
     recent_fvgs: List[Dict[str, Any]] = field(default_factory=list)
     recent_sweeps: List[Dict[str, Any]] = field(default_factory=list)
+    detected_patterns: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -92,6 +89,11 @@ class MarketPacket:
     candidate_signals: Dict[str, Any]  # scalp_signal, swing_signal
     cross_pair_momentum: Dict[str, Any]
     news_blackout: Dict[str, Any]
+    detected_patterns: List[Dict[str, Any]] = field(default_factory=list)
+    session_tag: str = "ALL"
+    rollover_spread_guard_active: bool = False
+    cme_gap_status: Optional[str] = None
+    intermarket_liquidity_impulse: str = "NEUTRAL"
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -252,6 +254,9 @@ class MarketPacketCompiler:
                     "level": round(level, 5),
                 })
 
+        # Analyze single timeframe price action patterns
+        patterns = scan_all_price_action_patterns(df, timeframe=timeframe_label)
+
         return TimeframeAnalysis(
             timeframe=timeframe_label,
             bias=bias,
@@ -265,6 +270,7 @@ class MarketPacketCompiler:
             key_lows=[round(l, 5) for l in lows],
             recent_fvgs=recent_fvgs,
             recent_sweeps=recent_sweeps,
+            detected_patterns=patterns,
         )
 
     def extract_pdh_pdl(self, df_d1: Optional[pd.DataFrame]) -> Tuple[Optional[float], Optional[float]]:
@@ -356,8 +362,7 @@ class MarketPacketCompiler:
         provided_data: Optional[Dict[str, pd.DataFrame]] = None,
     ) -> Dict[str, Any]:
         """
-        Build compact Cross-Pair Context Snapshot across XM instruments.
-        Computes 1H/4H % change, overall USD strength/weakness, and Crypto trend.
+        Build compact Cross-Pair Context Snapshot for Gold vs Bitcoin USD-liquidity & risk impulse.
         """
         results: Dict[str, Dict[str, float]] = {}
 
@@ -379,43 +384,26 @@ class MarketPacketCompiler:
             else:
                 results[sym] = {"pct_1h": 0.0, "pct_4h": 0.0, "close": 0.0}
 
-        # Analyze USD Bias
-        # Pairs: EURUSD (inverse USD), GBPUSD (inverse USD), GOLD (inverse USD), USDJPY (direct USD)
-        usd_signals = []
-        if "USDJPY#" in results and results["USDJPY#"]["pct_1h"] != 0.0:
-            usd_signals.append(1 if results["USDJPY#"]["pct_1h"] > 0 else -1)
-        if "EURUSD#" in results and results["EURUSD#"]["pct_1h"] != 0.0:
-            usd_signals.append(-1 if results["EURUSD#"]["pct_1h"] > 0 else 1)
-        if "GBPUSD#" in results and results["GBPUSD#"]["pct_1h"] != 0.0:
-            usd_signals.append(-1 if results["GBPUSD#"]["pct_1h"] > 0 else 1)
-        if "GOLD#" in results and results["GOLD#"]["pct_1h"] != 0.0:
-            usd_signals.append(-1 if results["GOLD#"]["pct_1h"] > 0 else 1)
+        gold_pct = results.get("GOLD#", {}).get("pct_1h", 0.0)
+        btc_pct = results.get("BTCUSD#", {}).get("pct_1h", 0.0)
 
-        usd_score = sum(usd_signals)
-        if usd_score >= 2:
-            usd_bias = "USD_STRENGTHENING"
-        elif usd_score <= -2:
-            usd_bias = "USD_WEAKENING"
+        # Cross-asset USD liquidity impulse
+        if gold_pct > 0.15 and btc_pct > 0.3:
+            impulse = "DOLLAR_DEVAL_EXPANSION"
+        elif gold_pct < -0.15 and btc_pct < -0.3:
+            impulse = "LIQUIDITY_DRAIN_CRUNCH"
+        elif gold_pct > 0.2 and btc_pct < -0.2:
+            impulse = "FLIGHT_TO_SAFETY_METALS"
+        elif btc_pct > 0.5 and abs(gold_pct) < 0.1:
+            impulse = "SPECULATIVE_RISK_ON_CRYPTO"
         else:
-            usd_bias = "USD_NEUTRAL_MIXED"
-
-        # Analyze Crypto Bias (BTCUSD, ETHUSD, SOLUSD)
-        crypto_pcts = [
-            results[s]["pct_1h"]
-            for s in ("BTCUSD#", "ETHUSD#", "SOLUSD#")
-            if s in results
-        ]
-        avg_crypto_pct = sum(crypto_pcts) / len(crypto_pcts) if crypto_pcts else 0.0
-        if avg_crypto_pct > 0.4:
-            crypto_bias = "CRYPTO_BULLISH_EXPANSION"
-        elif avg_crypto_pct < -0.4:
-            crypto_bias = "CRYPTO_BEARISH_CONTRACTION"
-        else:
-            crypto_bias = "CRYPTO_SIDEWAYS_CONSOLIDATION"
+            impulse = "NEUTRAL"
 
         return {
-            "usd_bias": usd_bias,
-            "crypto_bias": crypto_bias,
+            "gold_pct_1h": gold_pct,
+            "btc_pct_1h": btc_pct,
+            "intermarket_liquidity_impulse": impulse,
+            "usd_bias": "WEAK_USD" if impulse == "DOLLAR_DEVAL_EXPANSION" else ("STRONG_USD" if impulse == "LIQUIDITY_DRAIN_CRUNCH" else "NEUTRAL"),
             "pairs": results,
         }
 
@@ -464,9 +452,13 @@ class MarketPacketCompiler:
 
         # Analyze each timeframe
         tf_analyses: Dict[str, Any] = {}
+        all_detected_patterns: List[Dict[str, Any]] = []
+
         for tf, df_tf in dfs.items():
             analysis = self.analyze_single_timeframe(df_tf, tf)
             tf_analyses[tf] = asdict(analysis)
+            if analysis.detected_patterns:
+                all_detected_patterns.extend(analysis.detected_patterns)
 
         # Structural high/lows
         pdh, pdl = self.extract_pdh_pdl(dfs.get("D1"))
@@ -503,6 +495,39 @@ class MarketPacketCompiler:
         news_status = news_guard.check_blackout(symbol)
 
         now = now_utc()
+
+        # Session tag calibration
+        hour_utc = now.hour
+        minute_utc = now.minute
+        time_decimal = hour_utc + (minute_utc / 60.0)
+
+        if asset_class == "CRYPTO":
+            session_tag = "CRYPTO_24_7"
+            cme_gap_status = "TRACKED"
+            rollover_spread_guard_active = False
+        else:
+            # Gold Session awareness
+            if 0.0 <= time_decimal < 7.0:
+                session_tag = "ASIAN_RANGE"
+            elif 7.0 <= time_decimal < 11.0:
+                session_tag = "LONDON_OPEN"
+            elif 12.5 <= time_decimal < 16.5:
+                session_tag = "NY_OVERLAP"
+            elif 16.5 <= time_decimal < 21.0:
+                session_tag = "NY_AFTERNOON"
+            else:
+                session_tag = "OFF_HOURS_ROLLOVER"
+
+            cme_gap_status = None
+            # Daily broker rollover spread guard (23:50-01:05 server time ~ 21:50-23:05 UTC)
+            rollover_spread_guard_active = (
+                (hour_utc == 21 and minute_utc >= 50)
+                or (hour_utc == 22)
+                or (hour_utc == 23 and minute_utc <= 5)
+            )
+
+        impulse = cross_pair_mom.get("intermarket_liquidity_impulse", "NEUTRAL")
+
         return MarketPacket(
             symbol=symbol,
             asset_class=asset_class,
@@ -519,6 +544,11 @@ class MarketPacketCompiler:
             candidate_signals=candidate_signals,
             cross_pair_momentum=cross_pair_mom,
             news_blackout=news_status.to_dict(),
+            detected_patterns=all_detected_patterns,
+            session_tag=session_tag,
+            rollover_spread_guard_active=rollover_spread_guard_active,
+            cme_gap_status=cme_gap_status,
+            intermarket_liquidity_impulse=impulse,
         )
 
 

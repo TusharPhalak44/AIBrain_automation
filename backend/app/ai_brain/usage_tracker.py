@@ -177,3 +177,4 @@ def record_gemini_usage(
     finally:
         if close_db:
             db.close()
+

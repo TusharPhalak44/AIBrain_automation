@@ -104,6 +104,7 @@ CRITICAL INVARIANTS:
 4. Active Rules: Honor any active 'LIVE' or 'LOCKED' filter rules provided.
 5. If technical structure is conflicting or no high-probability setup exists right now, output decision='WAIT' and recommended_mode='NONE'.
 6. UPCOMING TRADE RADAR: ALWAYS provide an `upcoming_setup` plan detailing where the next high-probability setup is developing (e.g. watch_bias, trigger_zone_low, trigger_zone_high, planned_entry, planned_sl, planned_tp1, planned_tp2, rr_ratio, readiness_pct from 0 to 100, trigger_condition, invalidation_level, expected_window) even if your current decision is WAIT.
+7. SYMBOL PATTERN MEMORY: You are given `symbol_pattern_memory` showing the empirical win/loss scorecard of price-action patterns specifically on this symbol (GOLD# vs BTCUSD#). Favor patterns marked 'PROVEN_EDGE', and strictly avoid setups relying on patterns marked 'BLOCKED_TRAP' (decision MUST be 'WAIT').
 """
 
 
@@ -185,10 +186,49 @@ class GeminiSupervisor:
             if close_db:
                 db.close()
 
+    def get_pair_pattern_memory(self, symbol: str, db: Optional[Session] = None) -> List[Dict[str, Any]]:
+        """Fetch symbol-specific pattern memory scorecard rows (isolated GOLD# vs BTCUSD#)."""
+        close_db = False
+        if db is None:
+            db = SessionLocal()
+            close_db = True
+
+        try:
+            from backend.app.db.models import PairPatternMemory
+            clean = symbol.rstrip("#")
+            records = (
+                db.query(PairPatternMemory)
+                .filter(
+                    (PairPatternMemory.symbol == symbol)
+                    | (PairPatternMemory.symbol == clean)
+                    | (PairPatternMemory.symbol == f"{clean}#")
+                )
+                .order_by(PairPatternMemory.win_rate_pct.desc())
+                .all()
+            )
+            return [
+                {
+                    "pattern_signature": r.pattern_signature,
+                    "mode": r.mode,
+                    "status": r.status,
+                    "win_rate_pct": float(r.win_rate_pct),
+                    "wins": r.wins,
+                    "losses": r.losses,
+                    "avg_r_multiple": float(r.avg_r_multiple),
+                    "net_pnl_usd": float(r.net_pnl_usd),
+                    "last_ai_lesson": r.last_ai_lesson,
+                }
+                for r in records
+            ]
+        finally:
+            if close_db:
+                db.close()
+
     def _fallback_deterministic_supervision(
         self,
         packet: MarketPacket,
         active_rules: List[Dict[str, Any]],
+        pattern_memory: Optional[List[Dict[str, Any]]] = None,
     ) -> GeminiSupervisoryOutput:
         """
         High-fidelity deterministic supervisory logic used when Gemini API key is offline or in mock test mode.
@@ -430,6 +470,7 @@ class GeminiSupervisor:
         try:
             client, model_name = self.get_client(db=db)
             active_rules = self.get_active_rules(packet.symbol, db=db)
+            pattern_memory = self.get_pair_pattern_memory(packet.symbol, db=db)
 
             analysis_result: Optional[GeminiSupervisoryOutput] = None
             response = None
@@ -450,10 +491,12 @@ class GeminiSupervisor:
                         "swing_bias_h4_d1": packet.swing_bias_h4_d1,
                         "scalp_bias_m15_h1": packet.scalp_bias_m15_h1,
                         "timeframes": packet.timeframe_breakdown,
+                        "detected_patterns": packet.detected_patterns,
                         "candidate_signals": packet.candidate_signals,
                         "cross_pair_momentum": packet.cross_pair_momentum,
                         "news_blackout": packet.news_blackout,
                         "active_learned_rules": active_rules,
+                        "symbol_pattern_memory": pattern_memory,
                     }
 
                     user_content = (
@@ -507,7 +550,7 @@ class GeminiSupervisor:
                     analysis_result = None
 
             if analysis_result is None:
-                analysis_result = self._fallback_deterministic_supervision(packet, active_rules)
+                analysis_result = self._fallback_deterministic_supervision(packet, active_rules, pattern_memory)
 
             # Determine execution_status
             if analysis_result.decision.startswith("EXECUTE"):

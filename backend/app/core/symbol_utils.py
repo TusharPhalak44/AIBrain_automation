@@ -34,11 +34,12 @@ def resolve_broker_symbol(symbol: str, db: Session) -> str:
     if pair_stripped:
         return pair_stripped.symbol
 
-    # 4. Standard XM Ultra Low default if not in DB yet
-    known_pairs = {"GOLD", "EURUSD", "GBPUSD", "USDJPY", "BTCUSD", "ETHUSD", "SOLUSD"}
+    # 4. Standard XM Ultra Low 2-Pair default (Gold & Bitcoin only)
     clean_base = unquoted.rstrip("#")
-    if clean_base in known_pairs:
-        return f"{clean_base}#"
+    if clean_base in ("GOLD", "XAUUSD"):
+        return "GOLD#"
+    if clean_base in ("BTCUSD", "BTC"):
+        return "BTCUSD#"
 
-    return unquoted
+    return f"{clean_base}#" if not unquoted.endswith("#") else unquoted
 

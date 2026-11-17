@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from backend.app.core.clock_sync import now_utc
-from backend.app.db.models import LearnedPairRule, TradeLedger, MacroNewsEvent
+from backend.app.db.models import LearnedPairRule, TradeLedger, MacroNewsEvent, PairPatternMemory
 from backend.app.db.session import SessionLocal
 
 logger = logging.getLogger(__name__)
@@ -365,6 +365,138 @@ class ForensicLearner:
                 logger.warning(f"Error evaluating rule {r.rule_code}: {e}")
 
         return False, None
+
+    def update_pattern_memory_on_trade_close(
+        self,
+        trade_id: int,
+        db: Optional[Session] = None,
+    ) -> List[PairPatternMemory]:
+        """
+        Closed-loop self-learning: updates PairPatternMemory on trade close,
+        categorizing pattern setups as PROVEN_EDGE or BLOCKED_TRAP.
+        """
+        def _update(s: Session) -> List[PairPatternMemory]:
+            trade = s.query(TradeLedger).filter_by(id=trade_id).first()
+            if not trade:
+                return []
+
+            symbol = trade.symbol
+            # Normalize to symbol with #
+            if not symbol.endswith("#") and ("GOLD" in symbol or "BTC" in symbol or "USD" in symbol):
+                symbol = f"{symbol}#"
+
+            mode = trade.mode.upper() if trade.mode else "SCALP"
+            net_pnl = float(trade.net_pnl or 0.0)
+            is_win = net_pnl > 0.0
+            r_mult = float(trade.r_multiple or (1.5 if is_win else -1.0))
+
+            # Extract detected patterns from trade record
+            patterns: List[str] = []
+            if trade.detected_patterns_json:
+                try:
+                    parsed = json.loads(trade.detected_patterns_json)
+                    if isinstance(parsed, list):
+                        for p in parsed:
+                            if isinstance(p, dict) and "pattern_name" in p:
+                                patterns.append(str(p["pattern_name"]))
+                            elif isinstance(p, dict) and "pattern_type" in p:
+                                patterns.append(str(p["pattern_type"]))
+                            elif isinstance(p, str):
+                                patterns.append(p)
+                    elif isinstance(parsed, dict) and "patterns" in parsed:
+                        patterns.extend([str(x) for x in parsed["patterns"]])
+                except Exception:
+                    pass
+
+            if not patterns:
+                # Default baseline pattern based on mode
+                patterns = [f"{mode}_PRICE_ACTION_STRUCTURE"]
+
+            updated_rows: List[PairPatternMemory] = []
+            now = now_utc()
+
+            for pat_sig in patterns:
+                # Query existing memory strictly isolated for this symbol and pattern signature
+                row = (
+                    s.query(PairPatternMemory)
+                    .filter(
+                        PairPatternMemory.symbol == symbol,
+                        PairPatternMemory.pattern_signature == pat_sig,
+                    )
+                    .first()
+                )
+
+                if not row:
+                    row = PairPatternMemory(
+                        symbol=symbol,
+                        mode=mode,
+                        pattern_signature=pat_sig,
+                        session_tag="ALL",
+                        wins=1 if is_win else 0,
+                        losses=0 if is_win else 1,
+                        win_rate_pct=Decimal("100.00" if is_win else "0.00"),
+                        avg_r_multiple=Decimal(str(round(r_mult, 2))),
+                        net_pnl_usd=Decimal(str(round(net_pnl, 2))),
+                        status="LEARNING",
+                        last_ai_lesson=(
+                            f"Initial closed trade registered: {'WIN' if is_win else 'LOSS'} "
+                            f"(${net_pnl:.2f}, {r_mult:+.2f}R)."
+                        ),
+                        updated_at=now,
+                    )
+                    s.add(row)
+                else:
+                    new_wins = row.wins + (1 if is_win else 0)
+                    new_losses = row.losses + (0 if is_win else 1)
+                    tot = new_wins + new_losses
+                    win_pct = (new_wins / tot) * 100.0 if tot > 0 else 0.0
+                    cur_net = float(row.net_pnl_usd) + net_pnl
+
+                    # Running average R-Multiple
+                    cur_avg_r = float(row.avg_r_multiple)
+                    updated_avg_r = ((cur_avg_r * (tot - 1)) + r_mult) / tot if tot > 0 else r_mult
+
+                    row.wins = new_wins
+                    row.losses = new_losses
+                    row.win_rate_pct = Decimal(str(round(win_pct, 2)))
+                    row.avg_r_multiple = Decimal(str(round(updated_avg_r, 2)))
+                    row.net_pnl_usd = Decimal(str(round(cur_net, 2)))
+                    row.updated_at = now
+
+                    # Status classification
+                    if tot >= 3:
+                        if win_pct >= 60.0 and cur_net > 0:
+                            row.status = "PROVEN_EDGE"
+                            row.last_ai_lesson = (
+                                f"Validated institutional edge: {win_pct:.1f}% win rate across {tot} trades "
+                                f"(${cur_net:.2f} net, {updated_avg_r:+.2f}R avg)."
+                            )
+                        elif win_pct <= 35.0 or cur_net < 0:
+                            row.status = "BLOCKED_TRAP"
+                            row.last_ai_lesson = (
+                                f"High-risk pattern trap: {win_pct:.1f}% win rate across {tot} trades "
+                                f"(${cur_net:.2f} net). Automatically de-prioritized in AI prompt."
+                            )
+                        else:
+                            row.status = "LEARNING"
+                            row.last_ai_lesson = (
+                                f"Pattern in active discovery: {win_pct:.1f}% win rate ({tot} trades)."
+                            )
+                    else:
+                        row.status = "LEARNING"
+                        row.last_ai_lesson = (
+                            f"Sample size {tot}/3: {'WIN' if is_win else 'LOSS'} on latest execution."
+                        )
+
+                updated_rows.append(row)
+
+            s.commit()
+            return updated_rows
+
+        if db is not None:
+            return _update(db)
+        with SessionLocal() as session:
+            return _update(session)
 
 
 forensic_learner = ForensicLearner()

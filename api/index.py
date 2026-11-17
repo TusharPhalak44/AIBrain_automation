@@ -10,3 +10,4 @@ from backend.app.api.server import create_app
 
 # Instantiate FastAPI application without background daemons (watchdog/mt5 local process) on serverless
 app = create_app(enable_lifespan_tasks=False)
+

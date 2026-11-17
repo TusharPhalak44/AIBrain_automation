@@ -194,6 +194,11 @@ export const api = {
         method: "POST",
       }),
     getUpcomingSetups: () => request<any>("/api/ai/upcoming-setups"),
+    getPatternMemory: (symbol?: string) => {
+      const q = symbol ? `?symbol=${encodeURIComponent(symbol)}` : "";
+      return request<any[]>(`/api/ai/pattern-memory${q}`);
+    },
+    getPendingLimits: () => request<any[]>("/api/ai/pending-limits"),
   },
 
   strategies: {
@@ -215,6 +220,14 @@ export const api = {
       }),
     delete: (id: number) =>
       request<any>(`/api/strategies/${id}`, {
+        method: "DELETE",
+      }),
+    restoreDefaults: () =>
+      request<any>("/api/strategies/restore-defaults", {
+        method: "POST",
+      }),
+    deleteBacktest: (runId: number) =>
+      request<any>(`/api/strategies/backtests/${runId}`, {
         method: "DELETE",
       }),
     backtest: (payload: any) =>

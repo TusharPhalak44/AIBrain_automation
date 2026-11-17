@@ -398,3 +398,4 @@ def update_rate_cards(payload: UpdateRatesPayload, db: Session = Depends(get_db)
 
     db.commit()
     return {"status": "SUCCESS", "message": "Model rate cards updated successfully"}
+

@@ -19,6 +19,7 @@ from backend.app.db.models import (
     TradingPairBot,
     TradeLedger,
     LearnedPairRule,
+    PairPatternMemory,
 )
 from backend.app.ai_brain.scheduler import scheduler
 from backend.app.ai_brain.news_guard import news_guard
@@ -561,5 +562,102 @@ def trigger_manual_forensics(trade_id: int, db: Session = Depends(get_db)):
             "improvement_pct": float(rule.backtest_net_improvement_pct),
         } if rule else None,
     }
+
+
+@router.get("/pattern-memory")
+def get_pattern_memory(
+    symbol: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Fetch per-pair pattern win/loss memory scorecard (strictly isolating GOLD# vs BTCUSD#).
+    """
+    query = db.query(PairPatternMemory)
+    if symbol:
+        resolved = resolve_broker_symbol(symbol, db)
+        clean = resolved.rstrip("#")
+        query = query.filter(
+            (PairPatternMemory.symbol == resolved)
+            | (PairPatternMemory.symbol == clean)
+            | (PairPatternMemory.symbol == f"{clean}#")
+        )
+
+    records = query.order_by(PairPatternMemory.symbol.asc(), PairPatternMemory.win_rate_pct.desc()).all()
+    return [
+        {
+            "id": r.id,
+            "symbol": r.symbol,
+            "mode": r.mode,
+            "pattern_signature": r.pattern_signature,
+            "session_tag": r.session_tag,
+            "wins": r.wins,
+            "losses": r.losses,
+            "total_trades": r.wins + r.losses,
+            "win_rate_pct": float(r.win_rate_pct),
+            "avg_r_multiple": float(r.avg_r_multiple),
+            "net_pnl_usd": float(r.net_pnl_usd),
+            "status": r.status,
+            "last_ai_lesson": r.last_ai_lesson,
+            "updated_at_ist": to_ist_str(r.updated_at),
+        }
+        for r in records
+    ]
+
+
+@router.get("/pending-limits")
+async def get_pending_limits(db: Session = Depends(get_db)):
+    """
+    Return all active resting pending limit orders from MT5 broker terminal
+    supplemented with TradeLedger records.
+    """
+    mt5_orders = []
+    if mt5_connector.is_connected:
+        try:
+            mt5_orders = await mt5_connector.get_pending_orders()
+        except Exception as e:
+            logger.debug(f"Error fetching pending orders from MT5: {e}")
+
+    # Also check TradeLedger for pending limits
+    db_pending = db.query(TradeLedger).filter(TradeLedger.status == "PENDING").all()
+    db_dict = {t.order_ticket: t for t in db_pending if t.order_ticket}
+
+    combined = []
+    seen_tickets = set()
+
+    for ord_item in mt5_orders:
+        t_id = ord_item.get("ticket")
+        seen_tickets.add(t_id)
+        db_rec = db_dict.get(t_id)
+        combined.append({
+            "ticket": t_id,
+            "symbol": ord_item.get("symbol"),
+            "order_type": ord_item.get("type_desc", "LIMIT"),
+            "volume": ord_item.get("volume", 0.01),
+            "price_open": ord_item.get("price_open", 0.0),
+            "sl": ord_item.get("sl", 0.0),
+            "tp": ord_item.get("tp", 0.0),
+            "magic": ord_item.get("magic", 1001),
+            "comment": ord_item.get("comment", ""),
+            "state": "RESTING_ON_BROKER",
+            "detected_patterns": json.loads(db_rec.detected_patterns_json) if db_rec and db_rec.detected_patterns_json else [],
+        })
+
+    for t in db_pending:
+        if t.order_ticket not in seen_tickets:
+            combined.append({
+                "ticket": t.order_ticket or t.id,
+                "symbol": t.symbol,
+                "order_type": f"{t.direction}_LIMIT",
+                "volume": float(t.lots),
+                "price_open": float(t.entry_price),
+                "sl": float(t.sl),
+                "tp": float(t.tp2),
+                "magic": t.magic_number,
+                "comment": f"AUTO_{t.mode}",
+                "state": "PENDING_EXECUTION",
+                "detected_patterns": json.loads(t.detected_patterns_json) if t.detected_patterns_json else [],
+            })
+
+    return combined
 
 

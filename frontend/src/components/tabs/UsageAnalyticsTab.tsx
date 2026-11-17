@@ -171,21 +171,19 @@ export const UsageAnalyticsTab: React.FC = () => {
           <div className="flex bg-slate-950 border border-slate-800 rounded-md p-0.5">
             <button
               onClick={() => setCurrency("USD")}
-              className={`px-2.5 py-1 text-xs font-semibold rounded ${
-                currency === "USD"
-                  ? "bg-cyan-500/20 text-cyan-400"
-                  : "text-slate-400 hover:text-white"
-              }`}
+              className={`px-2.5 py-1 text-xs font-semibold rounded ${currency === "USD"
+                ? "bg-cyan-500/20 text-cyan-400"
+                : "text-slate-400 hover:text-white"
+                }`}
             >
               USD ($)
             </button>
             <button
               onClick={() => setCurrency("INR")}
-              className={`px-2.5 py-1 text-xs font-semibold rounded ${
-                currency === "INR"
-                  ? "bg-cyan-500/20 text-cyan-400"
-                  : "text-slate-400 hover:text-white"
-              }`}
+              className={`px-2.5 py-1 text-xs font-semibold rounded ${currency === "INR"
+                ? "bg-cyan-500/20 text-cyan-400"
+                : "text-slate-400 hover:text-white"
+                }`}
             >
               INR (₹{inrRate})
             </button>
@@ -197,11 +195,10 @@ export const UsageAnalyticsTab: React.FC = () => {
               <button
                 key={g}
                 onClick={() => setGranularity(g)}
-                className={`px-2.5 py-1 text-xs font-semibold rounded ${
-                  granularity === g
-                    ? "bg-slate-800 text-white"
-                    : "text-slate-400 hover:text-white"
-                }`}
+                className={`px-2.5 py-1 text-xs font-semibold rounded ${granularity === g
+                  ? "bg-slate-800 text-white"
+                  : "text-slate-400 hover:text-white"
+                  }`}
               >
                 {g}
               </button>
@@ -246,16 +243,12 @@ export const UsageAnalyticsTab: React.FC = () => {
         <select
           value={selectedSymbol}
           onChange={(e) => setSelectedSymbol(e.target.value)}
-          className="bg-slate-950 border border-slate-800 rounded px-2.5 py-1 text-slate-200 focus:outline-none focus:border-cyan-500"
+          className="bg-slate-950 border border-slate-800 rounded px-2.5 py-1 text-slate-200 focus:outline-none focus:border-cyan-500 font-bold"
         >
-          <option value="">All Pairs (Global)</option>
-          <option value="GOLD#">GOLD#</option>
-          <option value="EURUSD#">EURUSD#</option>
-          <option value="GBPUSD#">GBPUSD#</option>
-          <option value="USDJPY#">USDJPY#</option>
-          <option value="BTCUSD#">BTCUSD#</option>
-          <option value="ETHUSD#">ETHUSD#</option>
-          <option value="SOLUSD#">SOLUSD#</option>
+          <option value="">All Pairs</option>
+          <option value="GOLD#">GOLD# (Spot Gold)</option>
+          <option value="BTCUSD#">BTCUSD# (Bitcoin CFD)</option>
+          <option value="GLOBAL">GLOBAL (System / Forensics)</option>
         </select>
 
         {/* Model */}
@@ -534,11 +527,10 @@ export const UsageAnalyticsTab: React.FC = () => {
                     </td>
                     <td className="py-2">
                       <span
-                        className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
-                          row.billing_tier === "FREE"
-                            ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
-                            : "bg-blue-500/10 text-blue-400 border border-blue-500/20"
-                        }`}
+                        className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${row.billing_tier === "FREE"
+                          ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+                          : "bg-blue-500/10 text-blue-400 border border-blue-500/20"
+                          }`}
                       >
                         {row.billing_tier}
                       </span>
@@ -706,3 +698,4 @@ export const UsageAnalyticsTab: React.FC = () => {
     </div>
   );
 };
+
