@@ -18,6 +18,8 @@ from backend.app.db.models import (
     SystemHealthEvent,
     GeminiAnalysisReport,
     MacroNewsEvent,
+    GeminiModelRateCard,
+    GeminiUsageLedger,
 )
 
 logger = logging.getLogger(__name__)
@@ -79,8 +81,41 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def init_db(bind_engine=None) -> None:
     """Create all tables and seed default settings and profiles if missing."""
+    from decimal import Decimal
     eng = bind_engine or engine
     Base.metadata.create_all(bind=eng)
+
+    # Safe column migrations for existing tables in MySQL/MariaDB/SQLite
+    try:
+        with eng.connect() as conn:
+            # app_settings migrations
+            for col, col_type in [
+                ("gemini_use_free_tier", "BOOLEAN DEFAULT FALSE"),
+                ("remote_db_host", "VARCHAR(255) NULL"),
+                ("remote_db_port", "INT DEFAULT 3306"),
+                ("remote_db_user", "VARCHAR(128) NULL"),
+                ("remote_db_pass_enc", "TEXT NULL"),
+                ("remote_db_name", "VARCHAR(128) NULL"),
+                ("active_db_target", "VARCHAR(16) DEFAULT 'LOCAL_XAMPP'"),
+            ]:
+                try:
+                    conn.execute(text(f"ALTER TABLE app_settings ADD COLUMN {col} {col_type};"))
+                    conn.commit()
+                except Exception:
+                    pass
+            # gemini_analysis_reports migrations
+            for col, col_type in [
+                ("upcoming_setup_json", "TEXT NULL"),
+                ("readiness_pct", "INT DEFAULT 0"),
+                ("watch_bias", "VARCHAR(32) DEFAULT 'NONE'"),
+            ]:
+                try:
+                    conn.execute(text(f"ALTER TABLE gemini_analysis_reports ADD COLUMN {col} {col_type};"))
+                    conn.commit()
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.debug(f"Column check passed or ignored: {e}")
 
     session_cls = sessionmaker(bind=eng)
     with session_cls() as session:
@@ -163,6 +198,27 @@ def init_db(bind_engine=None) -> None:
                         tick_size=tsize,
                         tick_value=tval,
                         digits=dig,
+                    )
+                )
+
+        # Seed Gemini Model Rate Cards
+        default_rate_cards = [
+            ("gemini-3.8-flash", Decimal("0.75"), Decimal("3.75"), Decimal("0.075"), True),
+            ("gemini-3-flash-preview", Decimal("0.50"), Decimal("3.00"), Decimal("0.05"), True),
+            ("gemini-3.5-flash-lite", Decimal("0.30"), Decimal("2.50"), Decimal("0.03"), True),
+            ("gemini-3.1-pro-preview", Decimal("2.00"), Decimal("12.00"), Decimal("0.20"), False),
+            ("gemini-4-argon", Decimal("2.00"), Decimal("10.00"), Decimal("0.10"), False),
+        ]
+        for mid, in_r, out_r, c_r, free_elig in default_rate_cards:
+            rc = session.query(GeminiModelRateCard).filter_by(model_id=mid).first()
+            if not rc:
+                session.add(
+                    GeminiModelRateCard(
+                        model_id=mid,
+                        input_per_1m_usd=in_r,
+                        output_per_1m_usd=out_r,
+                        cached_per_1m_usd=c_r,
+                        is_free_tier_eligible=free_elig,
                     )
                 )
 

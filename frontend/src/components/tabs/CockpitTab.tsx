@@ -383,8 +383,18 @@ export const CockpitTab: React.FC<CockpitTabProps> = ({
           <div className="flex-1 overflow-y-auto p-2">
             {plannedTrades.length > 0 && (
               <div className="mb-3 space-y-1.5">
-                <div className="text-[10px] text-amber-400 font-bold uppercase tracking-wider px-1">
-                  Pending Human Confirmation (Copilot 1-Click)
+                <div className="flex items-center justify-between px-1">
+                  <div className="text-[10px] text-amber-400 font-bold uppercase tracking-wider flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                    <span>
+                      {executionMode === "AUTO"
+                        ? "⚡ AUTO-EXECUTE ARMED: Direct broker order on price trigger zone"
+                        : "🎯 COPILOT RADAR: Auto-triggers in zone or execute instantly below"}
+                    </span>
+                  </div>
+                  <span className="text-[10px] text-slate-400 font-mono">
+                    {plannedTrades.length} Setup{plannedTrades.length > 1 ? "s" : ""}
+                  </span>
                 </div>
                 {plannedTrades.map((t) => (
                   <div
@@ -405,6 +415,9 @@ export const CockpitTab: React.FC<CockpitTabProps> = ({
                         </span>
                         <span className="text-[10px] text-slate-400 font-mono">
                           {fmtLots(t.lots)} Lots
+                        </span>
+                        <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-950/60 text-emerald-300 border border-emerald-800/60 font-semibold">
+                          ⚡ Auto-Trigger Armed
                         </span>
                       </div>
                       <div className="text-[10px] text-slate-300 mt-1 flex gap-3 font-mono">
@@ -434,7 +447,7 @@ export const CockpitTab: React.FC<CockpitTabProps> = ({
                         className="flex items-center gap-1.5 px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded shadow transition"
                       >
                         <CheckCircle2 className="w-3.5 h-3.5" />
-                        <span>{actionLoading === t.id ? "Executing..." : "Approve & Enter"}</span>
+                        <span>{actionLoading === t.id ? "Dispatching..." : (executionMode === "AUTO" ? "⚡ Enter Now (Market)" : "Approve & Enter")}</span>
                       </button>
                     </div>
                   </div>

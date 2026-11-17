@@ -259,6 +259,12 @@ def test_deal_reconciliation_math_and_exit_reasons(db_session):
 # -------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_telegram_contact_binding_and_report_exports(db_session):
+    # Clean previous run artifacts
+    db_session.query(TelegramRecipient).filter(
+        (TelegramRecipient.phone_number == "+919876543210") | (TelegramRecipient.invite_token == "token_abc_123")
+    ).delete()
+    db_session.commit()
+
     # 1. Onboarding & Phone Verification
     rec = TelegramRecipient(
         name="Tushar Trader",

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import {
   Brain,
   Zap,
@@ -10,6 +10,14 @@ import {
   XCircle,
   BookOpen,
   RefreshCw,
+  Target,
+  Compass,
+  TrendingUp,
+  TrendingDown,
+  Crosshair,
+  ArrowUpRight,
+  ArrowDownRight,
+  Send,
 } from "lucide-react";
 import { fmtPct, fmtConfidence, safeArr, safeStr } from "../../utils/format";
 import { PairSchedule } from "../../hooks/useLiveStore";
@@ -33,6 +41,9 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
   const [isScanning, setIsScanning] = useState(false);
   const [ruleActionLoading, setRuleActionLoading] = useState<number | null>(null);
   const [isStaging, setIsStaging] = useState<number | null>(null);
+  const [actionLoading, setActionLoading] = useState<number | null>(null);
+  const [upcomingData, setUpcomingData] = useState<any>({ actionable_setups: [], watchlist_radar: [] });
+  const [radarSubView, setRadarSubView] = useState<"ALL" | "ACTIONABLE" | "WATCHLIST">("ALL");
   const toast = useToast();
 
   const handleStageReport = async (rep: any) => {
@@ -56,6 +67,7 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
         ai_analysis_summary: rep.thesis_text || `Staged from Gemini Report #${rep.id}`,
       });
       toast.success("Trade Staged", `Planned ${isSell ? "SELL" : "BUY"} setup staged into Copilot for ${rep.symbol}.`);
+      fetchBrainData();
     } catch (e: any) {
       toast.error("Staging Failed", e.message || String(e));
     } finally {
@@ -63,28 +75,95 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
     }
   };
 
-  const fetchBrainData = async () => {
+  const handleApproveCopilot = async (tradeId: number) => {
+    setActionLoading(tradeId);
+    try {
+      const res = await api.ai.approveCopilot(tradeId);
+      toast.success("Order Dispatched", res.message || `Copilot setup #${tradeId} executed on MT5.`);
+      fetchBrainData();
+    } catch (e: any) {
+      toast.error("Execution Failed", e.message || String(e));
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleRejectCopilot = async (tradeId: number) => {
+    try {
+      await api.ai.rejectCopilot(tradeId);
+      toast.info("Setup Dismissed", `Copilot setup #${tradeId} dismissed.`);
+      fetchBrainData();
+    } catch (e: any) {
+      toast.error("Dismiss Failed", e.message || String(e));
+    }
+  };
+
+  const handlePreStageUpcoming = async (item: any) => {
+    try {
+      const isSell = item.watch_bias === "BEARISH_WATCH";
+      await api.ai.stageCopilot({
+        symbol: item.symbol,
+        mode: item.setup_mode || "SCALP",
+        direction: isSell ? "SELL" : "BUY",
+        entry_price: item.planned_entry,
+        sl: item.planned_sl,
+        tp1: item.planned_tp1,
+        tp2: item.planned_tp2,
+        lots: 0.01,
+        ai_analysis_summary: item.trigger_condition || `Pre-staged limit from Gemini Radar`,
+      });
+      toast.success("Pre-Staged into Copilot", `Staged ${item.symbol} planned ${isSell ? "SELL" : "BUY"} limit order.`);
+      fetchBrainData();
+    } catch (e: any) {
+      toast.error("Pre-Staging Failed", e.message || String(e));
+    }
+  };
+
+  const handleSendTelegramAlert = async (item: any) => {
+    try {
+      await api.telegram.testMessage();
+      toast.success("Alert Sent", `Dispatched setup alert for ${item.symbol} to Telegram.`);
+    } catch (e: any) {
+      toast.error("Alert Failed", e.message || String(e));
+    }
+  };
+
+  const fetchBrainData = useCallback(async () => {
     setIsLoading(true);
     try {
-      const [repData, newsPayload, rulesData] = await Promise.all([
+      const [repData, newsPayload, rulesData, upcomingPayload] = await Promise.all([
         api.ai.getReports({ limit: 20 }),
         api.ai.getNews(selectedSymbol),
         api.ai.getRules(),
+        api.ai.getUpcomingSetups(),
       ]);
 
       setReports(safeArr(repData));
       setNewsData(newsPayload || { events: [], blackout_check: null });
       setLearnedRules(safeArr(rulesData));
+      setUpcomingData(upcomingPayload || { actionable_setups: [], watchlist_radar: [] });
     } catch (e: any) {
       console.error("Failed to fetch AI supervisor data:", e);
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [selectedSymbol]);
 
   useEffect(() => {
     fetchBrainData();
-  }, [selectedSymbol]);
+
+    // 3-second live radar refresh for distance points and price updates
+    const radarTimer = window.setInterval(async () => {
+      try {
+        const up = await api.ai.getUpcomingSetups();
+        if (up) setUpcomingData(up);
+      } catch (e) {
+        // silent
+      }
+    }, 3000);
+
+    return () => clearInterval(radarTimer);
+  }, [fetchBrainData]);
 
   const handleScanPair = async () => {
     setIsScanning(true);
@@ -193,6 +272,332 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
             <span>Scan All Pairs</span>
           </button>
         </div>
+      </div>
+
+      {/* UPCOMING TRADES & PRE-TRIGGER SETUPS RADAR */}
+      <div className="bg-[#121824] border border-slate-800 rounded-xl p-4 space-y-4">
+        {/* Radar Header & Filter Pills */}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/80 pb-3">
+          <div className="flex items-center gap-3">
+            <div className="p-2.5 rounded-lg bg-amber-500/10 text-amber-400 border border-amber-500/20">
+              <Target className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 className="font-bold text-white text-sm tracking-wide">
+                  UPCOMING TRADES & PRE-TRIGGER SETUPS RADAR
+                </h3>
+                <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-blue-500/10 text-blue-400 border border-blue-500/20">
+                  MODE: {upcomingData?.execution_mode || "COPILOT"}
+                </span>
+                <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-slate-800 text-slate-300">
+                  {upcomingData?.account_type || "DEMO"}
+                </span>
+              </div>
+              <p className="text-xs text-slate-400">
+                Institutional setups forecasted by Gemini with live tick proximity tracking and auto-execution readiness.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-1.5 bg-slate-950 border border-slate-800 rounded-lg p-1 text-xs">
+            <button
+              onClick={() => setRadarSubView("ALL")}
+              className={`px-3 py-1 rounded font-semibold transition ${
+                radarSubView === "ALL"
+                  ? "bg-amber-500/20 text-amber-300"
+                  : "text-slate-400 hover:text-white"
+              }`}
+            >
+              All ({(upcomingData?.actionable_setups?.length || 0) + (upcomingData?.watchlist_radar?.length || 0)})
+            </button>
+            <button
+              onClick={() => setRadarSubView("ACTIONABLE")}
+              className={`px-3 py-1 rounded font-semibold transition ${
+                radarSubView === "ACTIONABLE"
+                  ? "bg-emerald-500/20 text-emerald-300"
+                  : "text-slate-400 hover:text-white"
+              }`}
+            >
+              Actionable Copilot ({upcomingData?.actionable_setups?.length || 0})
+            </button>
+            <button
+              onClick={() => setRadarSubView("WATCHLIST")}
+              className={`px-3 py-1 rounded font-semibold transition ${
+                radarSubView === "WATCHLIST"
+                  ? "bg-cyan-500/20 text-cyan-300"
+                  : "text-slate-400 hover:text-white"
+              }`}
+            >
+              Watchlist Radar ({upcomingData?.watchlist_radar?.length || 0})
+            </button>
+          </div>
+        </div>
+
+        {/* Section A: Actionable Copilot Setups */}
+        {(radarSubView === "ALL" || radarSubView === "ACTIONABLE") && (
+          <div className="space-y-2.5">
+            <div className="flex items-center justify-between text-xs">
+              <span className="font-bold text-emerald-400 flex items-center gap-1.5">
+                <Crosshair className="w-4 h-4" />
+                <span>Actionable Setups Ready for Execution ({upcomingData?.actionable_setups?.length || 0})</span>
+              </span>
+              <span className="text-[11px] text-slate-500 font-mono">1-Click MT5 Broker Order Send</span>
+            </div>
+
+            {upcomingData?.actionable_setups && upcomingData.actionable_setups.length > 0 ? (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {upcomingData.actionable_setups.map((setup: any) => {
+                  const isBuy = setup.direction === "BUY";
+                  return (
+                    <div
+                      key={setup.id}
+                      className="bg-slate-950/80 border border-slate-800 rounded-xl p-3.5 space-y-3 hover:border-slate-700 transition"
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-white text-sm font-mono">{setup.symbol}</span>
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                              isBuy
+                                ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                                : "bg-red-500/20 text-red-300 border border-red-500/30"
+                            }`}
+                          >
+                            {setup.direction} {setup.mode}
+                          </span>
+                          <span className="text-slate-400 text-xs font-mono">{setup.lots} Lots</span>
+                        </div>
+
+                        {/* Live Distance Pill */}
+                        <div
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-1 font-mono ${
+                            setup.in_trigger_zone
+                              ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 animate-pulse"
+                              : "bg-slate-800 text-slate-300"
+                          }`}
+                        >
+                          {setup.in_trigger_zone ? (
+                            <span>🎯 IN TRIGGER ZONE</span>
+                          ) : (
+                            <span>{Math.abs(setup.distance_points)} pts away</span>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Coordinates Grid */}
+                      <div className="grid grid-cols-5 gap-1.5 bg-slate-900/60 p-2 rounded-lg font-mono text-[11px]">
+                        <div>
+                          <div className="text-[10px] text-slate-500">Entry</div>
+                          <div className="text-white font-bold">{setup.entry_price}</div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] text-slate-500">Stop Loss</div>
+                          <div className="text-red-400">{setup.sl}</div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] text-slate-500">TP1 (+1.5R)</div>
+                          <div className="text-emerald-400">{setup.tp1}</div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] text-slate-500">TP2 (+3R)</div>
+                          <div className="text-emerald-300 font-bold">{setup.tp2}</div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] text-slate-500">R:R</div>
+                          <div className="text-cyan-400 font-bold">{setup.rr_ratio}R</div>
+                        </div>
+                      </div>
+
+                      {/* Readiness Bar */}
+                      <div>
+                        <div className="flex justify-between text-[10px] text-slate-400 mb-1">
+                          <span>Setup Readiness</span>
+                          <span className="font-bold text-emerald-400">{setup.readiness_pct}%</span>
+                        </div>
+                        <div className="w-full bg-slate-900 rounded-full h-1.5 overflow-hidden">
+                          <div
+                            style={{ width: `${setup.readiness_pct}%` }}
+                            className="bg-emerald-500 h-full rounded-full transition-all"
+                          />
+                        </div>
+                      </div>
+
+                      <p className="text-[11px] text-slate-400 line-clamp-2 italic">
+                        "{setup.thesis || 'Algorithmic setup confirmed by Gemini Supervisor.'}"
+                      </p>
+
+                      {/* Action Buttons */}
+                      <div className="flex gap-2 pt-1 border-t border-slate-800/60">
+                        <button
+                          disabled={actionLoading === setup.id}
+                          onClick={() => handleRejectCopilot(setup.id)}
+                          className="flex-1 py-1.5 bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white rounded-lg text-xs font-semibold border border-slate-800 transition"
+                        >
+                          Dismiss
+                        </button>
+                        <button
+                          disabled={actionLoading === setup.id}
+                          onClick={() => handleApproveCopilot(setup.id)}
+                          className="flex-2 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 shadow"
+                        >
+                          <CheckCircle className="w-3.5 h-3.5" />
+                          <span>{actionLoading === setup.id ? "Dispatching..." : "Approve & Enter Now (Market)"}</span>
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="p-3 bg-slate-950/40 border border-slate-800/60 rounded-lg text-slate-500 text-xs text-center font-mono">
+                No setups currently staged in Copilot. Setups can be triggered automatically or pre-staged from the Watchlist Radar below.
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Section B: Watchlist Developing Radar Cards */}
+        {(radarSubView === "ALL" || radarSubView === "WATCHLIST") && (
+          <div className="space-y-2.5 pt-2">
+            <div className="flex items-center justify-between text-xs">
+              <span className="font-bold text-cyan-400 flex items-center gap-1.5">
+                <Compass className="w-4 h-4" />
+                <span>Developing Watchlist Radar Across Monitored Pairs ({upcomingData?.watchlist_radar?.length || 0})</span>
+              </span>
+              <span className="text-[11px] text-slate-500 font-mono">Ticking Real-Time against XM MT5 Quotes</span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+              {upcomingData?.watchlist_radar && upcomingData.watchlist_radar.length > 0 ? (
+                upcomingData.watchlist_radar.map((item: any, idx: number) => {
+                  const isBull = item.watch_bias === "BULLISH_WATCH";
+                  return (
+                    <div
+                      key={idx}
+                      className="bg-slate-950 border border-slate-800 rounded-xl p-3.5 space-y-2.5 hover:border-slate-700 transition"
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-white text-sm font-mono">{item.symbol}</span>
+                          <span
+                            className={`px-1.5 py-0.5 rounded text-[10px] font-bold flex items-center gap-1 ${
+                              isBull
+                                ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+                                : "bg-red-500/10 text-red-400 border border-red-500/20"
+                            }`}
+                          >
+                            {isBull ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
+                            <span>{item.watch_bias}</span>
+                          </span>
+                        </div>
+
+                        {/* Proximity Tag */}
+                        <span
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono ${
+                            item.status === "TRIGGER_READY"
+                              ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 animate-pulse"
+                              : item.status === "APPROACHING"
+                              ? "bg-amber-500/20 text-amber-400 border border-amber-500/30"
+                              : "bg-slate-800 text-slate-400"
+                          }`}
+                        >
+                          {item.status === "TRIGGER_READY"
+                            ? "🎯 TRIGGER READY"
+                            : item.status === "APPROACHING"
+                            ? `⚡ ${Math.abs(item.distance_points)} pts away`
+                            : `⏳ ${Math.abs(item.distance_points)} pts away`}
+                        </span>
+                      </div>
+
+                      {/* Trigger Zone & Planned Coordinates */}
+                      <div className="bg-slate-900/80 p-2.5 rounded-lg border border-slate-800/80 font-mono text-[11px] space-y-1.5">
+                        <div className="flex justify-between text-slate-400">
+                          <span>Trigger Zone:</span>
+                          <span className="text-amber-400 font-bold">
+                            {item.trigger_zone_low} - {item.trigger_zone_high}
+                          </span>
+                        </div>
+                        <div className="flex justify-between text-slate-400">
+                          <span>Planned Entry:</span>
+                          <span className="text-white font-bold">{item.planned_entry}</span>
+                        </div>
+                        <div className="flex justify-between text-slate-400">
+                          <span>SL / TP2:</span>
+                          <span>
+                            <span className="text-red-400">{item.planned_sl}</span>
+                            <span className="text-slate-600 mx-1">/</span>
+                            <span className="text-emerald-400 font-bold">{item.planned_tp2}</span>
+                          </span>
+                        </div>
+                        <div className="flex justify-between text-slate-400">
+                          <span>Risk / Reward:</span>
+                          <span className="text-cyan-400 font-bold">{item.rr_ratio}R</span>
+                        </div>
+                      </div>
+
+                      {/* Readiness Bar */}
+                      <div>
+                        <div className="flex justify-between text-[10px] text-slate-400 mb-1">
+                          <span>Readiness</span>
+                          <span className="font-bold text-white">{item.readiness_pct}%</span>
+                        </div>
+                        <div className="w-full bg-slate-900 rounded-full h-1.5 overflow-hidden">
+                          <div
+                            style={{ width: `${item.readiness_pct}%` }}
+                            className={`h-full rounded-full transition-all ${
+                              item.readiness_pct >= 85
+                                ? "bg-emerald-500"
+                                : item.readiness_pct >= 70
+                                ? "bg-cyan-500"
+                                : "bg-amber-500"
+                            }`}
+                          />
+                        </div>
+                      </div>
+
+                      {/* Condition & Window */}
+                      <div className="text-[11px] text-slate-300 space-y-0.5">
+                        <div className="text-slate-400 font-semibold text-[10px]">Trigger Condition:</div>
+                        <div className="text-[11px] text-slate-300 line-clamp-2">
+                          {item.trigger_condition || "Waiting for key support/resistance sweep"}
+                        </div>
+                        <div className="text-[10px] text-slate-500 mt-1 flex justify-between">
+                          <span>Window: {item.expected_window || "Next 1-2 hours"}</span>
+                          {item.invalidation_level > 0 && (
+                            <span>Cancel: {item.invalidation_level}</span>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Actions */}
+                      <div className="flex gap-2 pt-1 border-t border-slate-800/60">
+                        <button
+                          onClick={() => handleSendTelegramAlert(item)}
+                          className="px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-slate-300 rounded-lg text-xs font-semibold border border-slate-800 transition"
+                          title="Broadcast setup alert to configured Telegram channel"
+                        >
+                          <Send className="w-3.5 h-3.5 text-blue-400" />
+                        </button>
+                        <button
+                          onClick={() => handlePreStageUpcoming(item)}
+                          className="flex-1 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5"
+                        >
+                          <Target className="w-3.5 h-3.5" />
+                          <span>Pre-Stage Limit in Copilot</span>
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
+              ) : (
+                <div className="col-span-3 py-6 text-center text-slate-500 text-xs">
+                  Scanning for high-probability setups... Click "Scan All Pairs" to refresh developing radar.
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Interval Controls & AI Supervisory Feed Grid */}

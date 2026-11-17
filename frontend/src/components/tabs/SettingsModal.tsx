@@ -13,6 +13,10 @@ import {
   RefreshCw,
   Activity,
   Zap,
+  Download,
+  Upload,
+  Server,
+  HardDrive,
 } from "lucide-react";
 import { api } from "../../services/api";
 import { useToast } from "../Toast";
@@ -31,7 +35,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   dbHealthy,
 }) => {
   const toast = useToast();
-  const [activeTab, setActiveTab] = useState<"ACCOUNTS" | "AI" | "RISK" | "TELEGRAM" | "DIAG">("ACCOUNTS");
+  const [activeTab, setActiveTab] = useState<"ACCOUNTS" | "AI" | "RISK" | "TELEGRAM" | "DIAG" | "DATABASE">("ACCOUNTS");
 
   // Account Form
   const [accountType, setAccountType] = useState<"DEMO" | "LIVE">("DEMO");
@@ -70,12 +74,98 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [smokeReport, setSmokeReport] = useState<any | null>(null);
   const [isRunningSmokeCheck, setIsRunningSmokeCheck] = useState(false);
 
+  // Database & Remote Hosting
+  const [dbStatus, setDbStatus] = useState<any>(null);
+  const [remoteHost, setRemoteHost] = useState("");
+  const [remotePort, setRemotePort] = useState(3306);
+  const [remoteUser, setRemoteUser] = useState("");
+  const [remotePassword, setRemotePassword] = useState("");
+  const [remoteDbName, setRemoteDbName] = useState("");
+  const [syncLocalData, setSyncLocalData] = useState(true);
+  const [isTestingDb, setIsTestingDb] = useState(false);
+  const [isApplyingDb, setIsApplyingDb] = useState(false);
+  const [dbTestResult, setDbTestResult] = useState<any>(null);
+  const [activeDbTarget, setActiveDbTarget] = useState<string>("LOCAL_XAMPP");
+
   useEffect(() => {
     if (isOpen) {
       loadSettings();
       loadAccount(accountType);
+      loadDbStatus();
     }
   }, [isOpen, accountType]);
+
+  const loadDbStatus = async () => {
+    try {
+      const data = await api.dbAdmin.getStatus();
+      setDbStatus(data);
+      if (data.active_target) setActiveDbTarget(data.active_target);
+      if (data.remote_profile) {
+        if (data.remote_profile.host) setRemoteHost(data.remote_profile.host);
+        if (data.remote_profile.port) setRemotePort(data.remote_profile.port);
+        if (data.remote_profile.user) setRemoteUser(data.remote_profile.user);
+        if (data.remote_profile.database) setRemoteDbName(data.remote_profile.database);
+        if (data.remote_profile.has_password) setRemotePassword("••••••••");
+      }
+    } catch (e: any) {
+      console.warn("Could not load db status:", e);
+    }
+  };
+
+  const handleTestRemoteDb = async () => {
+    setIsTestingDb(true);
+    setDbTestResult(null);
+    try {
+      const res = await api.dbAdmin.testConnection({
+        host: remoteHost,
+        port: remotePort,
+        user: remoteUser,
+        password: remotePassword === "••••••••" ? "" : remotePassword,
+        database: remoteDbName,
+      });
+      setDbTestResult(res);
+      if (res.success) {
+        toast.success("Remote MySQL Connected", res.message);
+      } else {
+        toast.error("Connection Failed", res.message);
+      }
+    } catch (e: any) {
+      toast.error("Test Failed", e.message || String(e));
+    } finally {
+      setIsTestingDb(false);
+    }
+  };
+
+  const handleApplyRemoteDb = async () => {
+    setIsApplyingDb(true);
+    try {
+      const res = await api.dbAdmin.applyConnection({
+        host: remoteHost,
+        port: remotePort,
+        user: remoteUser,
+        password: remotePassword === "••••••••" ? "" : remotePassword,
+        database: remoteDbName,
+        sync_data: syncLocalData,
+      });
+      toast.success("Remote MySQL Applied", res.message);
+      loadDbStatus();
+    } catch (e: any) {
+      toast.error("Migration Failed", e.message || String(e));
+    } finally {
+      setIsApplyingDb(false);
+    }
+  };
+
+  const handleSwitchDbTarget = async (target: string) => {
+    try {
+      await api.dbAdmin.switchTarget(target);
+      setActiveDbTarget(target);
+      toast.info("Target Switched", `Active database target set to ${target}.`);
+      loadDbStatus();
+    } catch (e: any) {
+      toast.error("Switch Failed", e.message || String(e));
+    }
+  };
 
   const loadSettings = async () => {
     try {
@@ -296,6 +386,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             { id: "AI", label: "Gemini AI" },
             { id: "RISK", label: "Risk Locks" },
             { id: "TELEGRAM", label: "Telegram" },
+            { id: "DATABASE", label: "MySQL & Cloud Hosting" },
             { id: "DIAG", label: "Diagnostics" },
           ].map((t) => (
             <button
@@ -618,6 +709,203 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 >
                   Save Telegram Config
                 </button>
+              </div>
+            </div>
+          )}
+
+          {/* TAB: DATABASE & CLOUD HOSTING */}
+          {activeTab === "DATABASE" && (
+            <div className="space-y-4">
+              {/* Target Selector & Status */}
+              <div className="bg-slate-900 border border-slate-800 rounded-xl p-3.5 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                      <Database className="w-4 h-4 text-cyan-400" />
+                      <span>Active MySQL Target</span>
+                    </span>
+                    <span className="text-[11px] text-slate-400">
+                      Switch between local development XAMPP and remote web-hosting / cPanel MySQL.
+                    </span>
+                  </div>
+
+                  <div className="flex bg-slate-950 border border-slate-800 rounded-lg p-0.5">
+                    <button
+                      onClick={() => handleSwitchDbTarget("LOCAL_XAMPP")}
+                      className={`px-3 py-1 rounded text-xs font-bold transition ${
+                        activeDbTarget === "LOCAL_XAMPP"
+                          ? "bg-cyan-600 text-white"
+                          : "text-slate-400 hover:text-white"
+                      }`}
+                    >
+                      LOCAL XAMPP
+                    </button>
+                    <button
+                      onClick={() => handleSwitchDbTarget("REMOTE_HOSTED")}
+                      className={`px-3 py-1 rounded text-xs font-bold transition ${
+                        activeDbTarget === "REMOTE_HOSTED"
+                          ? "bg-cyan-600 text-white"
+                          : "text-slate-400 hover:text-white"
+                      }`}
+                    >
+                      REMOTE HOSTED
+                    </button>
+                  </div>
+                </div>
+
+                {dbStatus && (
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2 pt-2 border-t border-slate-800/80 font-mono text-[11px]">
+                    <div className="bg-slate-950 p-2 rounded border border-slate-800">
+                      <div className="text-slate-500">Host & Port</div>
+                      <div className="font-bold text-slate-200 truncate">
+                        {dbStatus.host}:{dbStatus.port}
+                      </div>
+                    </div>
+                    <div className="bg-slate-950 p-2 rounded border border-slate-800">
+                      <div className="text-slate-500">Database</div>
+                      <div className="font-bold text-cyan-400 truncate">{dbStatus.database_name}</div>
+                    </div>
+                    <div className="bg-slate-950 p-2 rounded border border-slate-800">
+                      <div className="text-slate-500">Latency</div>
+                      <div className="font-bold text-emerald-400">{dbStatus.latency_ms}ms</div>
+                    </div>
+                    <div className="bg-slate-950 p-2 rounded border border-slate-800">
+                      <div className="text-slate-500">Total Rows</div>
+                      <div className="font-bold text-purple-300">{dbStatus.total_rows} rows</div>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Remote MySQL Credentials Form */}
+              <div className="bg-slate-900 border border-slate-800 rounded-xl p-3.5 space-y-3">
+                <div className="flex items-center gap-2 text-xs font-bold text-white">
+                  <Server className="w-4 h-4 text-cyan-400" />
+                  <span>Remote Web-Hosting / cPanel Credentials</span>
+                </div>
+
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="col-span-2">
+                    <label className="text-slate-400 block mb-1">MySQL Host / IP</label>
+                    <input
+                      type="text"
+                      value={remoteHost}
+                      onChange={(e) => setRemoteHost(e.target.value)}
+                      placeholder="e.g. sql.myhosting.com or 192.168.1.10"
+                      className="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-slate-100 font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-slate-400 block mb-1">Port</label>
+                    <input
+                      type="number"
+                      value={remotePort}
+                      onChange={(e) => setRemotePort(parseInt(e.target.value) || 3306)}
+                      className="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-slate-100 font-mono"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-3 gap-3">
+                  <div>
+                    <label className="text-slate-400 block mb-1">Username</label>
+                    <input
+                      type="text"
+                      value={remoteUser}
+                      onChange={(e) => setRemoteUser(e.target.value)}
+                      placeholder="e.g. u12345_trading"
+                      className="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-slate-100 font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-slate-400 block mb-1">Password</label>
+                    <input
+                      type="password"
+                      value={remotePassword}
+                      onChange={(e) => setRemotePassword(e.target.value)}
+                      placeholder="Remote DB password"
+                      className="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-slate-100 font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-slate-400 block mb-1">Database Name</label>
+                    <input
+                      type="text"
+                      value={remoteDbName}
+                      onChange={(e) => setRemoteDbName(e.target.value)}
+                      placeholder="e.g. u12345_xm_v2"
+                      className="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-slate-100 font-mono"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between pt-1">
+                  <label className="flex items-center gap-2 cursor-pointer text-slate-300">
+                    <input
+                      type="checkbox"
+                      checked={syncLocalData}
+                      onChange={(e) => setSyncLocalData(e.target.checked)}
+                      className="rounded bg-slate-950 border-slate-700 text-cyan-600 focus:ring-0"
+                    />
+                    <span>Sync existing local tables & settings to remote on apply</span>
+                  </label>
+
+                  <div className="flex gap-2">
+                    <button
+                      disabled={isTestingDb || !remoteHost || !remoteUser || !remoteDbName}
+                      onClick={handleTestRemoteDb}
+                      className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold rounded text-xs border border-slate-700 transition disabled:opacity-50"
+                    >
+                      {isTestingDb ? "Pinging..." : "Test Connection"}
+                    </button>
+                    <button
+                      disabled={isApplyingDb || !remoteHost || !remoteUser || !remoteDbName}
+                      onClick={handleApplyRemoteDb}
+                      className="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white font-bold rounded text-xs transition disabled:opacity-50"
+                    >
+                      {isApplyingDb ? "Migrating..." : "Apply & Migrate"}
+                    </button>
+                  </div>
+                </div>
+
+                {dbTestResult && (
+                  <div
+                    className={`p-2.5 rounded text-xs font-mono border ${
+                      dbTestResult.success
+                        ? "bg-emerald-950/30 border-emerald-500/30 text-emerald-300"
+                        : "bg-red-950/30 border-red-500/30 text-red-300"
+                    }`}
+                  >
+                    <div>{dbTestResult.message}</div>
+                    {dbTestResult.server_version && <div>Server: {dbTestResult.server_version}</div>}
+                  </div>
+                )}
+              </div>
+
+              {/* Data Export & Backup Hub */}
+              <div className="bg-slate-900 border border-slate-800 rounded-xl p-3.5 space-y-3">
+                <div className="flex items-center gap-2 text-xs font-bold text-white">
+                  <HardDrive className="w-4 h-4 text-emerald-400" />
+                  <span>Database Export & Settings Backup Hub</span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    onClick={() => window.open(api.dbAdmin.exportSqlUrl(), "_blank")}
+                    className="flex items-center justify-center gap-2 p-3 bg-slate-950 hover:bg-slate-800 border border-slate-800 rounded-lg text-slate-200 font-bold text-xs transition"
+                  >
+                    <Download className="w-4 h-4 text-cyan-400" />
+                    <span>Download phpMyAdmin SQL Dump (.sql)</span>
+                  </button>
+
+                  <button
+                    onClick={() => window.open(api.dbAdmin.exportSettingsJsonUrl(), "_blank")}
+                    className="flex items-center justify-center gap-2 p-3 bg-slate-950 hover:bg-slate-800 border border-slate-800 rounded-lg text-slate-200 font-bold text-xs transition"
+                  >
+                    <Download className="w-4 h-4 text-emerald-400" />
+                    <span>Export Settings JSON Backup (.json)</span>
+                  </button>
+                </div>
               </div>
             </div>
           )}

@@ -13,6 +13,7 @@ from backend.app.core.crypto_vault import crypto_vault
 from backend.app.db.models import AppSettings
 from backend.app.db.session import get_db
 from backend.app.ai_brain.gemini_supervisor import gemini_supervisor
+from backend.app.ai_brain.usage_tracker import record_gemini_usage
 
 router = APIRouter(prefix="/settings", tags=["Application Settings"])
 
@@ -34,6 +35,7 @@ class SettingsUpdateSchema(BaseModel):
     telegram_admin_chat_id: Optional[str] = None
     display_timezone: Optional[str] = None
     broker_tz_offset_sec: Optional[int] = None
+    gemini_use_free_tier: Optional[bool] = None
 
 
 class TestGeminiKeySchema(BaseModel):
@@ -66,6 +68,12 @@ def _serialize_settings(st: AppSettings) -> Dict[str, Any]:
         "telegram_admin_chat_id": st.telegram_admin_chat_id,
         "display_timezone": st.display_timezone,
         "broker_tz_offset_sec": st.broker_tz_offset_sec,
+        "gemini_use_free_tier": bool(getattr(st, "gemini_use_free_tier", False)),
+        "active_db_target": getattr(st, "active_db_target", "LOCAL_XAMPP"),
+        "remote_db_host": getattr(st, "remote_db_host", None),
+        "remote_db_port": getattr(st, "remote_db_port", 3306),
+        "remote_db_user": getattr(st, "remote_db_user", None),
+        "remote_db_name": getattr(st, "remote_db_name", None),
         "updated_at_utc": st.updated_at_utc.isoformat() if st.updated_at_utc else None,
         "updated_at_ist": to_ist_str(st.updated_at_utc) if st.updated_at_utc else "-",
     }
@@ -119,6 +127,8 @@ def _apply_settings_update(payload: SettingsUpdateSchema, db: Session) -> AppSet
         st.display_timezone = payload.display_timezone.strip()
     if payload.broker_tz_offset_sec is not None:
         st.broker_tz_offset_sec = payload.broker_tz_offset_sec
+    if payload.gemini_use_free_tier is not None:
+        st.gemini_use_free_tier = payload.gemini_use_free_tier
 
     # Secret encryption with bullet mask protection
     if payload.gemini_api_key is not None and payload.gemini_api_key.strip():
@@ -231,6 +241,17 @@ def test_gemini_key(payload: Optional[TestGeminiKeySchema] = None, db: Session =
             )
             latency_ms = int((time.perf_counter() - t0) * 1000)
             reply_text = resp.text.strip() if resp and resp.text else "CONNECTED"
+            try:
+                record_gemini_usage(
+                    db=db,
+                    model_id=candidate_model,
+                    call_purpose="KEY_TEST",
+                    response=resp,
+                    latency_ms=latency_ms,
+                    symbol="GLOBAL",
+                )
+            except Exception:
+                pass
             return {
                 "status": "SUCCESS",
                 "message": f"Successfully verified Gemini API key on model '{candidate_model}' in {latency_ms}ms.",

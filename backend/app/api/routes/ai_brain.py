@@ -23,6 +23,7 @@ from backend.app.db.models import (
 from backend.app.ai_brain.scheduler import scheduler
 from backend.app.ai_brain.news_guard import news_guard
 from backend.app.ai_brain.forensic_learner import forensic_learner
+from backend.app.mt5_bridge.connector import mt5_connector
 
 logger = logging.getLogger(__name__)
 
@@ -78,11 +79,189 @@ def list_ai_reports(
             "news_summary": r.news_summary,
             "thesis_text": r.thesis_text,
             "execution_status": r.execution_status,
+            "readiness_pct": getattr(r, "readiness_pct", 0),
+            "watch_bias": getattr(r, "watch_bias", "NONE"),
+            "upcoming_setup": json.loads(r.upcoming_setup_json) if getattr(r, "upcoming_setup_json", None) else None,
             "scanned_at_utc": r.scanned_at_utc.isoformat(),
             "scanned_at_ist": to_ist_str(r.scanned_at_utc),
         }
         for r in reports
     ]
+
+
+@router.get("/upcoming-setups")
+async def get_upcoming_setups(db: Session = Depends(get_db)):
+    """
+    Return active upcoming setups across all pairs with live tick distance calculations.
+    Splits into:
+    1. actionable_setups: STAGE_PENDING / PLANNED Copilot trades ready for 1-click execution.
+    2. watchlist_radar: Developing pre-trigger setups with live distance points ticking towards entry.
+    """
+    st = db.query(AppSettings).filter_by(id=1).first()
+    active_type = st.active_account_type if st else "DEMO"
+    exec_mode = st.execution_mode if st else "COPILOT"
+
+    # 1. Actionable Setups (PLANNED in TradeLedger)
+    planned_trades = (
+        db.query(TradeLedger)
+        .filter_by(account_type=active_type, status="PLANNED")
+        .order_by(TradeLedger.opened_at_utc.desc())
+        .all()
+    )
+
+    actionable = []
+    for t in planned_trades:
+        pair_bot = db.query(TradingPairBot).filter_by(symbol=t.symbol).first()
+        digits = pair_bot.digits if pair_bot else 2
+
+        cur_price = float(t.entry_price)
+        dist_pts = 0
+        in_zone = True
+
+        if mt5_connector.is_connected:
+            import MetaTrader5 as mt5
+            try:
+                tick = mt5.symbol_info_tick(t.symbol)
+                if tick:
+                    cur_price = tick.ask if t.direction == "BUY" else tick.bid
+                    if t.direction == "BUY":
+                        dist_pts = int(round((cur_price - float(t.entry_price)) * (10 ** digits)))
+                    else:
+                        dist_pts = int(round((float(t.entry_price) - cur_price) * (10 ** digits)))
+                    in_zone = abs(dist_pts) <= 10
+            except Exception:
+                pass
+
+        sl_dist = abs(float(t.entry_price) - float(t.sl))
+        tp_dist = abs(float(t.tp2) - float(t.entry_price))
+        rr = round(tp_dist / max(0.0001, sl_dist), 2)
+
+        actionable.append({
+            "id": t.id,
+            "trade_id": t.id,
+            "symbol": t.symbol,
+            "direction": t.direction,
+            "mode": t.mode,
+            "lots": float(t.lots),
+            "entry_price": float(t.entry_price),
+            "sl": float(t.sl),
+            "tp1": float(t.tp1),
+            "tp2": float(t.tp2),
+            "rr_ratio": rr,
+            "current_price": cur_price,
+            "distance_points": dist_pts,
+            "in_trigger_zone": in_zone,
+            "status": "READY_TO_EXECUTE" if in_zone else ("APPROACHING" if abs(dist_pts) <= 25 else "DEVELOPING"),
+            "readiness_pct": 95 if in_zone else 80,
+            "thesis": t.ai_analysis_summary,
+            "staged_at_ist": to_ist_str(t.opened_at_utc),
+        })
+
+    # 2. Watchlist Radar (Latest Gemini Analysis Reports with upcoming setups)
+    pairs = db.query(TradingPairBot).filter_by(enabled=True).all()
+    watchlist = []
+
+    for p in pairs:
+        latest_rep = (
+            db.query(GeminiAnalysisReport)
+            .filter_by(account_type=active_type, symbol=p.symbol)
+            .order_by(GeminiAnalysisReport.scanned_at_utc.desc())
+            .first()
+        )
+        if not latest_rep:
+            continue
+
+        upcoming_data = None
+        if getattr(latest_rep, "upcoming_setup_json", None):
+            try:
+                upcoming_data = json.loads(latest_rep.upcoming_setup_json)
+            except Exception:
+                pass
+
+        if not upcoming_data:
+            entry_p = float(latest_rep.entry_price or 0.0)
+            sl_p = float(latest_rep.stop_loss or 0.0)
+            tp1_p = float(latest_rep.tp1 or 0.0)
+            tp2_p = float(latest_rep.tp2 or 0.0)
+            if entry_p > 0 and sl_p > 0:
+                is_buy = entry_p > sl_p
+                upcoming_data = {
+                    "watch_bias": "BULLISH_WATCH" if is_buy else "BEARISH_WATCH",
+                    "setup_mode": latest_rep.recommended_mode if latest_rep.recommended_mode != "NONE" else "SCALP",
+                    "trigger_zone_low": round(entry_p - (float(p.max_spread_points) * 0.01), p.digits),
+                    "trigger_zone_high": round(entry_p + (float(p.max_spread_points) * 0.01), p.digits),
+                    "planned_entry": entry_p,
+                    "planned_sl": sl_p,
+                    "planned_tp1": tp1_p,
+                    "planned_tp2": tp2_p,
+                    "rr_ratio": round(abs(tp2_p - entry_p) / max(0.0001, abs(entry_p - sl_p)), 2),
+                    "readiness_pct": 70,
+                    "trigger_condition": f"Supervisory {latest_rep.decision} confirmation",
+                    "invalidation_level": sl_p,
+                    "expected_window": "Next 1-3 hours",
+                }
+
+        if upcoming_data and upcoming_data.get("planned_entry"):
+            p_entry = float(upcoming_data["planned_entry"])
+            bias = upcoming_data.get("watch_bias", "NONE")
+            z_low = float(upcoming_data.get("trigger_zone_low") or (p_entry * 0.999))
+            z_high = float(upcoming_data.get("trigger_zone_high") or (p_entry * 1.001))
+
+            cur_price = p_entry
+            dist_pts = 0
+            if mt5_connector.is_connected:
+                import MetaTrader5 as mt5
+                try:
+                    tick = mt5.symbol_info_tick(p.symbol)
+                    if tick:
+                        cur_price = tick.ask if "BULL" in bias else tick.bid
+                        if "BULL" in bias:
+                            dist_pts = int(round((cur_price - p_entry) * (10 ** p.digits)))
+                        else:
+                            dist_pts = int(round((p_entry - cur_price) * (10 ** p.digits)))
+                except Exception:
+                    pass
+
+            in_zone = z_low <= cur_price <= z_high
+            status_tag = "TRIGGER_READY" if (in_zone or abs(dist_pts) <= 5) else ("APPROACHING" if abs(dist_pts) <= 25 else "DEVELOPING")
+
+            watchlist.append({
+                "symbol": p.symbol,
+                "asset_class": p.asset_class,
+                "report_id": latest_rep.id,
+                "market_regime": latest_rep.market_regime,
+                "decision": latest_rep.decision,
+                "confidence": float(latest_rep.confidence),
+                "watch_bias": bias,
+                "setup_mode": upcoming_data.get("setup_mode", "SCALP"),
+                "trigger_zone_low": z_low,
+                "trigger_zone_high": z_high,
+                "planned_entry": p_entry,
+                "planned_sl": float(upcoming_data.get("planned_sl") or 0.0),
+                "planned_tp1": float(upcoming_data.get("planned_tp1") or 0.0),
+                "planned_tp2": float(upcoming_data.get("planned_tp2") or 0.0),
+                "rr_ratio": float(upcoming_data.get("rr_ratio") or 2.5),
+                "readiness_pct": int(upcoming_data.get("readiness_pct") or 65),
+                "trigger_condition": upcoming_data.get("trigger_condition", ""),
+                "invalidation_level": float(upcoming_data.get("invalidation_level") or 0.0),
+                "expected_window": upcoming_data.get("expected_window", ""),
+                "current_price": cur_price,
+                "distance_points": dist_pts,
+                "in_trigger_zone": in_zone,
+                "status": status_tag,
+                "thesis": latest_rep.thesis_text,
+                "scanned_at_ist": to_ist_str(latest_rep.scanned_at_utc),
+            })
+
+    return {
+        "status": "SUCCESS",
+        "account_type": active_type,
+        "execution_mode": exec_mode,
+        "actionable_setups": actionable,
+        "watchlist_radar": watchlist,
+        "total_actionable": len(actionable),
+        "total_watchlist": len(watchlist),
+    }
 
 
 @router.post("/scan/{symbol}")

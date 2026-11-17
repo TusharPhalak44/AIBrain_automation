@@ -144,6 +144,10 @@ class LiveIntervalScheduler:
                     self._sync_pair_schedules(db)
                     st = db.query(AppSettings).filter_by(id=1).first()
                     exec_mode = st.execution_mode if st else "MONITOR"
+                    active_acc = st.active_account_type if st else "DEMO"
+
+                    if exec_mode == "AUTO":
+                        await self._check_and_auto_execute_planned_setups(db, active_acc)
 
                 if exec_mode == "HALTED":
                     for sched in self.pair_schedules.values():
@@ -167,6 +171,45 @@ class LiveIntervalScheduler:
                 logger.error(f"Error in scheduler loop: {e}")
 
             await asyncio.sleep(1.0)
+
+    async def _check_and_auto_execute_planned_setups(self, db: Session, active_account: str) -> None:
+        """Auto-execute PLANNED trades when market price enters the planned trigger zone."""
+        if not mt5_connector.is_connected:
+            return
+
+        import MetaTrader5 as mt5
+
+        try:
+            planned = (
+                db.query(TradeLedger)
+                .filter_by(account_type=active_account.upper(), status="PLANNED")
+                .all()
+            )
+            if not planned:
+                return
+
+            for trade in planned:
+                try:
+                    tick = mt5.symbol_info_tick(trade.symbol)
+                    if not tick:
+                        continue
+                    cur_price = tick.ask if trade.direction == "BUY" else tick.bid
+                    entry = float(trade.entry_price)
+                    pair_bot = db.query(TradingPairBot).filter_by(symbol=trade.symbol).first()
+                    digits = pair_bot.digits if pair_bot else 2
+
+                    dist_pts = int(round(abs(cur_price - entry) * (10 ** digits)))
+                    # If market price is within 12 points of planned entry, trigger execution!
+                    if dist_pts <= 12:
+                        logger.info(
+                            f"AUTO TRIGGER: Price {cur_price} reached planned entry {entry} ({dist_pts} pts) on {trade.symbol}. "
+                            f"Dispatching broker execution..."
+                        )
+                        await self.approve_copilot_setup(trade.id, db=db)
+                except Exception as ex:
+                    logger.debug(f"Error checking auto-trigger for setup #{trade.id}: {ex}")
+        except Exception as e:
+            logger.debug(f"Auto-trigger scan check exception: {e}")
 
     async def execute_pair_scan(
         self,

@@ -4,6 +4,7 @@ import {
   Brain,
   Code2,
   BookOpen,
+  BarChart3,
 } from "lucide-react";
 import { useLiveStore } from "./hooks/useLiveStore";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -12,10 +13,11 @@ import { CockpitTab } from "./components/tabs/CockpitTab";
 import { AIBrainTab } from "./components/tabs/AIBrainTab";
 import { StrategyLabTab } from "./components/tabs/StrategyLabTab";
 import { TradeBookTab } from "./components/tabs/TradeBookTab";
+import { UsageAnalyticsTab } from "./components/tabs/UsageAnalyticsTab";
 import { SettingsModal } from "./components/tabs/SettingsModal";
 import { ToastProvider, useToast } from "./components/Toast";
 
-type ActiveTab = "COCKPIT" | "AI_SUPERVISOR" | "STRATEGY_LAB" | "TRADE_BOOK";
+type ActiveTab = "COCKPIT" | "AI_SUPERVISOR" | "STRATEGY_LAB" | "TRADE_BOOK" | "USAGE_BILLING";
 
 const AppContent: React.FC = () => {
   const store = useLiveStore();
@@ -122,6 +124,18 @@ const AppContent: React.FC = () => {
             <BookOpen className="w-4 h-4" />
             <span>TRADE BOOK & FORENSICS</span>
           </button>
+
+          <button
+            onClick={() => setCurrentTab("USAGE_BILLING")}
+            className={`flex items-center gap-2 py-3 px-4 border-b-2 transition ${
+              currentTab === "USAGE_BILLING"
+                ? "border-cyan-500 text-cyan-400 font-bold bg-cyan-950/20"
+                : "border-transparent text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            <BarChart3 className="w-4 h-4" />
+            <span>AI USAGE & BILLING</span>
+          </button>
         </div>
 
         {/* Selected Pair Indicator */}
@@ -165,6 +179,8 @@ const AppContent: React.FC = () => {
           )}
 
           {currentTab === "TRADE_BOOK" && <TradeBookTab />}
+
+          {currentTab === "USAGE_BILLING" && <UsageAnalyticsTab />}
         </ErrorBoundary>
       </main>
 

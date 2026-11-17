@@ -23,6 +23,8 @@ from backend.app.api.routes import (
     strategies,
     ai_brain,
     candles,
+    usage_analytics,
+    db_admin,
 )
 from backend.app.api import websocket
 
@@ -108,6 +110,8 @@ def create_app(enable_lifespan_tasks: bool = True) -> FastAPI:
     app.include_router(strategies.router, prefix="/api")
     app.include_router(ai_brain.router, prefix="/api")
     app.include_router(candles.router, prefix="/api")
+    app.include_router(usage_analytics.router, prefix="/api")
+    app.include_router(db_admin.router, prefix="/api")
     app.include_router(websocket.router)
 
     return app

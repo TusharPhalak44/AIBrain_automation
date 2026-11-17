@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 import json
 import logging
+import time
 from typing import Any, Dict, List, Optional, Tuple
 from google import genai
 from google.genai import types
@@ -27,9 +28,33 @@ from backend.app.db.models import (
     TradingPairBot,
 )
 from backend.app.ai_brain.market_packet import MarketPacket, market_packet_compiler
+from backend.app.ai_brain.usage_tracker import record_gemini_usage
 from backend.app.api.websocket import manager
 
 logger = logging.getLogger(__name__)
+
+
+class UpcomingSetupPlan(BaseModel):
+    """Structured pre-trigger upcoming trade setup radar plan."""
+    watch_bias: str = Field(
+        default="NONE",
+        description="BULLISH_WATCH, BEARISH_WATCH, RANGE_BOUND, or NONE"
+    )
+    setup_mode: str = Field(
+        default="SCALP",
+        description="SCALP or SWING"
+    )
+    trigger_zone_low: Optional[float] = Field(default=None, description="Lower bound of trigger zone")
+    trigger_zone_high: Optional[float] = Field(default=None, description="Upper bound of trigger zone")
+    planned_entry: Optional[float] = Field(default=None, description="Planned entry level")
+    planned_sl: Optional[float] = Field(default=None, description="Planned hard stop loss level")
+    planned_tp1: Optional[float] = Field(default=None, description="Planned TP1 partial target (+1.5R)")
+    planned_tp2: Optional[float] = Field(default=None, description="Planned TP2 final target")
+    rr_ratio: Optional[float] = Field(default=None, description="Risk-Reward ratio (e.g. 2.5)")
+    readiness_pct: int = Field(default=0, ge=0, le=100, description="Readiness percentage 0-100%")
+    trigger_condition: str = Field(default="", description="Specific price action trigger needed to execute")
+    invalidation_level: Optional[float] = Field(default=None, description="Price level that cancels this setup")
+    expected_window: str = Field(default="", description="Estimated timeframe or session window")
 
 
 class GeminiSupervisoryOutput(BaseModel):
@@ -58,6 +83,10 @@ class GeminiSupervisoryOutput(BaseModel):
     bearish_factors: List[str] = Field(default_factory=list, description="List of bearish technical factors")
     news_and_macro_summary: str = Field(description="Summary of macro news and cross-pair impact")
     trade_plan_thesis: str = Field(description="Clear explanation of why this setup is planned or skipped")
+    upcoming_setup: Optional[UpcomingSetupPlan] = Field(
+        default=None,
+        description="Developing high-probability upcoming trade radar setup, even when decision is WAIT"
+    )
 
 
 SUPERVISOR_SYSTEM_PROMPT = """
@@ -73,7 +102,8 @@ CRITICAL INVARIANTS:
 2. News Blackout: If a Tier-1 news release is within +/- 15 minutes, decision MUST be 'WAIT' and regime MUST be 'NEWS_BLACKOUT'.
 3. Micro & Standard Exits: TP1 must always be set at +1.5R.
 4. Active Rules: Honor any active 'LIVE' or 'LOCKED' filter rules provided.
-5. If technical structure is conflicting or no high-probability setup exists, output decision='WAIT' and recommended_mode='NONE'.
+5. If technical structure is conflicting or no high-probability setup exists right now, output decision='WAIT' and recommended_mode='NONE'.
+6. UPCOMING TRADE RADAR: ALWAYS provide an `upcoming_setup` plan detailing where the next high-probability setup is developing (e.g. watch_bias, trigger_zone_low, trigger_zone_high, planned_entry, planned_sl, planned_tp1, planned_tp2, rr_ratio, readiness_pct from 0 to 100, trigger_condition, invalidation_level, expected_window) even if your current decision is WAIT.
 """
 
 
@@ -115,7 +145,7 @@ class GeminiSupervisor:
             if raw_key != self._cached_api_key or self._client is None:
                 self._client = genai.Client(api_key=raw_key)
                 self._cached_api_key = raw_key
-                logger.info(f"Initialized google-genai Client with model: {model}")
+                logger.info(f"Initialized google-genai Client with model: {self._model_name}")
 
             return self._client, self._model_name
         except Exception as e:
@@ -163,6 +193,9 @@ class GeminiSupervisor:
         """
         High-fidelity deterministic supervisory logic used when Gemini API key is offline or in mock test mode.
         """
+        digits = 2 if ("GOLD" in packet.symbol or "BTC" in packet.symbol or "ETH" in packet.symbol or "SOL" in packet.symbol) else (3 if "JPY" in packet.symbol else 5)
+        spread_price = (packet.ask - packet.bid) if (packet.ask > packet.bid and packet.bid > 0) else (packet.spread_points * (10 ** -digits) if packet.spread_points > 0 else 0.0001)
+
         # 1. Check Macro News Blackout
         if packet.news_blackout.get("is_blackout"):
             ev_title = packet.news_blackout.get("event_title", "Tier-1 Event")
@@ -239,6 +272,22 @@ class GeminiSupervisor:
             elif packet.scalp_bias_m15_h1 == "BEARISH":
                 bear_factors.append("M15/H1 EMA trend alignment")
 
+            scalp_upcoming = UpcomingSetupPlan(
+                watch_bias="BULLISH_WATCH" if direction == "BUY" else "BEARISH_WATCH",
+                setup_mode="SCALP",
+                trigger_zone_low=round(entry - (spread_price * 2), digits),
+                trigger_zone_high=round(entry + (spread_price * 2), digits),
+                planned_entry=entry,
+                planned_sl=sl,
+                planned_tp1=tp1,
+                planned_tp2=tp2,
+                rr_ratio=round(abs(tp2 - entry) / max(0.0001, abs(entry - sl)), 2),
+                readiness_pct=95,
+                trigger_condition=f"M15 Scalp {direction} trigger confirmed on {packet.symbol}",
+                invalidation_level=sl,
+                expected_window="Immediate / Next 15 mins",
+            )
+
             return GeminiSupervisoryOutput(
                 market_regime=regime,
                 decision="EXECUTE_SCALP",
@@ -256,6 +305,7 @@ class GeminiSupervisor:
                     f"Entry {entry}, Hard SL {sl}, TP1 {tp1} (+1.5R partial), TP2 {tp2}. "
                     f"Reason: {scalp_sig.get('reason', 'Confluence confirmed')}"
                 ),
+                upcoming_setup=scalp_upcoming,
             )
 
         # Evaluate Swing Signal
@@ -267,6 +317,22 @@ class GeminiSupervisor:
             tp2 = float(swing_sig["tp2"])
 
             regime = "TRENDING_UP" if direction == "BUY" else "TRENDING_DOWN"
+            swing_upcoming = UpcomingSetupPlan(
+                watch_bias="BULLISH_WATCH" if direction == "BUY" else "BEARISH_WATCH",
+                setup_mode="SWING",
+                trigger_zone_low=round(entry - (spread_price * 3), digits),
+                trigger_zone_high=round(entry + (spread_price * 3), digits),
+                planned_entry=entry,
+                planned_sl=sl,
+                planned_tp1=tp1,
+                planned_tp2=tp2,
+                rr_ratio=round(abs(tp2 - entry) / max(0.0001, abs(entry - sl)), 2),
+                readiness_pct=90,
+                trigger_condition=f"H1/H4 Swing {direction} structure confirmed on {packet.symbol}",
+                invalidation_level=sl,
+                expected_window="Next 1-4 hours",
+            )
+
             return GeminiSupervisoryOutput(
                 market_regime=regime,
                 decision="EXECUTE_SWING",
@@ -283,10 +349,57 @@ class GeminiSupervisor:
                     f"Approved algorithmic Swing {direction} on {packet.symbol}. "
                     f"Entry {entry}, SL {sl}, TP1 {tp1}, TP2 {tp2}."
                 ),
+                upcoming_setup=swing_upcoming,
             )
 
-        # Default Neutral Scan
+        # Default Neutral Scan - Synthesize high-probability upcoming trade setup
         regime = "HIGH_VOLATILITY_CHOP" if packet.scalp_bias_m15_h1 == "CHOP" else "RANGE_SWEEP"
+        price = packet.ask if packet.ask > 0 else (packet.bid or 1.0)
+        is_bullish = packet.scalp_bias_m15_h1 == "BULLISH" or packet.swing_bias_h4_d1 == "BULLISH"
+        bias = "BULLISH_WATCH" if is_bullish else "BEARISH_WATCH"
+        atr_est = max(0.001, spread_price * 10)
+        if packet.symbol.startswith("GOLD"):
+            atr_est = max(3.0, spread_price * 8)
+        elif "BTC" in packet.symbol:
+            atr_est = max(300.0, spread_price * 5)
+        elif "ETH" in packet.symbol:
+            atr_est = max(20.0, spread_price * 5)
+        elif "SOL" in packet.symbol:
+            atr_est = max(1.0, spread_price * 5)
+
+        if is_bullish:
+            p_entry = round(price - (atr_est * 0.4), digits)
+            p_sl = round(p_entry - atr_est, digits)
+            p_tp1 = round(p_entry + (1.5 * atr_est), digits)
+            p_tp2 = round(p_entry + (3.0 * atr_est), digits)
+            t_low = round(p_entry - (atr_est * 0.2), digits)
+            t_high = round(p_entry + (atr_est * 0.2), digits)
+            cond = f"Wait for M15 liquidity sweep below session low into FVG support ({t_low}-{t_high})"
+        else:
+            p_entry = round(price + (atr_est * 0.4), digits)
+            p_sl = round(p_entry + atr_est, digits)
+            p_tp1 = round(p_entry - (1.5 * atr_est), digits)
+            p_tp2 = round(p_entry - (3.0 * atr_est), digits)
+            t_low = round(p_entry - (atr_est * 0.2), digits)
+            t_high = round(p_entry + (atr_est * 0.2), digits)
+            cond = f"Wait for M15 liquidity sweep above session high into FVG supply ({t_low}-{t_high})"
+
+        neutral_upcoming = UpcomingSetupPlan(
+            watch_bias=bias,
+            setup_mode="SCALP",
+            trigger_zone_low=t_low,
+            trigger_zone_high=t_high,
+            planned_entry=p_entry,
+            planned_sl=p_sl,
+            planned_tp1=p_tp1,
+            planned_tp2=p_tp2,
+            rr_ratio=3.0,
+            readiness_pct=65,
+            trigger_condition=cond,
+            invalidation_level=p_sl,
+            expected_window="Next 1-3 hours / Session overlap",
+        )
+
         return GeminiSupervisoryOutput(
             market_regime=regime,
             decision="WAIT",
@@ -295,7 +408,8 @@ class GeminiSupervisor:
             bullish_factors=["H4/D1 Trend: " + packet.swing_bias_h4_d1],
             bearish_factors=["No active strategy entry signal triggered"],
             news_and_macro_summary=f"USD Bias: {packet.cross_pair_momentum.get('usd_bias')}",
-            trade_plan_thesis=f"Scanning {packet.symbol}. Current price {packet.bid}/{packet.ask}. Waiting for strategy trigger.",
+            trade_plan_thesis=f"Scanning {packet.symbol}. Current price {packet.bid}/{packet.ask}. Waiting for trigger zone confluence.",
+            upcoming_setup=neutral_upcoming,
         )
 
     async def analyze_pair(
@@ -318,6 +432,9 @@ class GeminiSupervisor:
             active_rules = self.get_active_rules(packet.symbol, db=db)
 
             analysis_result: Optional[GeminiSupervisoryOutput] = None
+            response = None
+            latency_ms = 0
+            chosen_model = model_name.replace("models/", "") if model_name else "gemini-3.8-flash"
 
             if client is not None:
                 try:
@@ -357,8 +474,11 @@ class GeminiSupervisor:
 
                     response = None
                     last_err = None
+                    chosen_model = clean_m
+                    latency_ms = 0
                     for try_m in ordered_models:
                         try:
+                            t0 = time.perf_counter()
                             response = await client.aio.models.generate_content(
                                 model=try_m,
                                 contents=user_content,
@@ -369,7 +489,9 @@ class GeminiSupervisor:
                                     temperature=0.2,
                                 ),
                             )
+                            latency_ms = int((time.perf_counter() - t0) * 1000)
                             if response and response.text:
+                                chosen_model = try_m
                                 break
                         except Exception as try_e:
                             last_err = try_e
@@ -395,6 +517,15 @@ class GeminiSupervisor:
             else:
                 execution_status = "WAITING"
 
+            # Parse upcoming setup details
+            upcoming_dict = None
+            readiness_val = 0
+            bias_val = "NONE"
+            if analysis_result.upcoming_setup:
+                upcoming_dict = analysis_result.upcoming_setup.model_dump()
+                readiness_val = analysis_result.upcoming_setup.readiness_pct
+                bias_val = analysis_result.upcoming_setup.watch_bias
+
             # Create Report Entity
             report = GeminiAnalysisReport(
                 account_type=account_type.upper(),
@@ -411,6 +542,9 @@ class GeminiSupervisor:
                 news_summary=analysis_result.news_and_macro_summary,
                 thesis_text=analysis_result.trade_plan_thesis,
                 execution_status=execution_status,
+                upcoming_setup_json=json.dumps(upcoming_dict) if upcoming_dict else None,
+                readiness_pct=readiness_val,
+                watch_bias=bias_val,
                 raw_snapshot_json=json.dumps({
                     "packet": packet.to_dict(),
                     "output": analysis_result.model_dump(),
@@ -420,6 +554,23 @@ class GeminiSupervisor:
             db.add(report)
             db.commit()
             db.refresh(report)
+
+            # Record token usage ledger if response returned
+            if response is not None:
+                try:
+                    record_gemini_usage(
+                        db=db,
+                        model_id=chosen_model,
+                        call_purpose="LIVE_SCAN",
+                        response=response,
+                        latency_ms=latency_ms,
+                        symbol=packet.symbol,
+                        account_type=account_type,
+                        report_id=report.id,
+                        http_status=200,
+                    )
+                except Exception as ex_usage:
+                    logger.warning(f"Failed to record usage ledger: {ex_usage}")
 
             # Broadcast over WebSocket
             report_dict = {
@@ -438,6 +589,9 @@ class GeminiSupervisor:
                 "news_summary": report.news_summary,
                 "thesis_text": report.thesis_text,
                 "execution_status": report.execution_status,
+                "readiness_pct": readiness_val,
+                "watch_bias": bias_val,
+                "upcoming_setup": upcoming_dict,
                 "scanned_at_ist": to_ist_str(report.scanned_at_utc),
             }
             await manager.broadcast(report_dict)

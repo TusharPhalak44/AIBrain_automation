@@ -193,6 +193,7 @@ export const api = {
       request<any>(`/api/ai/forensics/${tradeId}`, {
         method: "POST",
       }),
+    getUpcomingSetups: () => request<any>("/api/ai/upcoming-setups"),
   },
 
   strategies: {
@@ -274,6 +275,78 @@ export const api = {
       if (accountType) q.append("account_type", accountType);
       return `/api/reports/export?${q.toString()}`;
     },
+  },
+
+  usage: {
+    getSummary: (params: {
+      granularity?: string;
+      start_date?: string;
+      end_date?: string;
+      symbol?: string;
+      model_id?: string;
+      call_purpose?: string;
+      account_type?: string;
+      usd_to_inr_rate?: number;
+    } = {}) => {
+      const q = new URLSearchParams();
+      if (params.granularity) q.append("granularity", params.granularity);
+      if (params.start_date) q.append("start_date", params.start_date);
+      if (params.end_date) q.append("end_date", params.end_date);
+      if (params.symbol) q.append("symbol", params.symbol);
+      if (params.model_id) q.append("model_id", params.model_id);
+      if (params.call_purpose) q.append("call_purpose", params.call_purpose);
+      if (params.account_type) q.append("account_type", params.account_type);
+      if (params.usd_to_inr_rate) q.append("usd_to_inr_rate", String(params.usd_to_inr_rate));
+      return request<any>(`/api/usage/summary?${q.toString()}`);
+    },
+    exportCsvUrl: (params: {
+      start_date?: string;
+      end_date?: string;
+      symbol?: string;
+      model_id?: string;
+      call_purpose?: string;
+      account_type?: string;
+    } = {}) => {
+      const q = new URLSearchParams();
+      if (params.start_date) q.append("start_date", params.start_date);
+      if (params.end_date) q.append("end_date", params.end_date);
+      if (params.symbol) q.append("symbol", params.symbol);
+      if (params.model_id) q.append("model_id", params.model_id);
+      if (params.call_purpose) q.append("call_purpose", params.call_purpose);
+      if (params.account_type) q.append("account_type", params.account_type);
+      return `/api/usage/export?${q.toString()}`;
+    },
+    getRates: () => request<any>("/api/usage/rates"),
+    updateRates: (payload: { rates?: any[]; gemini_use_free_tier?: boolean }) =>
+      request<any>("/api/usage/rates", {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      }),
+  },
+
+  dbAdmin: {
+    getStatus: () => request<any>("/api/db-admin/status"),
+    testConnection: (payload: any) =>
+      request<any>("/api/db-admin/test-connection", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      }),
+    applyConnection: (payload: any) =>
+      request<any>("/api/db-admin/apply-connection", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      }),
+    switchTarget: (target: string) =>
+      request<any>(`/api/db-admin/switch-target?target=${encodeURIComponent(target)}`, {
+        method: "POST",
+      }),
+    exportSqlUrl: () => "/api/db-admin/export-sql",
+    exportSettingsJsonUrl: () => "/api/db-admin/export-settings-json",
+    importSettingsJson: (payload: any) =>
+      request<any>("/api/db-admin/import-settings-json", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      }),
   },
 
   health: {

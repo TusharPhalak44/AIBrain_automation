@@ -2,10 +2,12 @@
   "name": "aibrain-portal",
   "version": "2.0.0",
   "private": true,
+  "workspaces": [
+    "frontend"
+  ],
   "scripts": {
-    "build": "npm --prefix frontend run build",
-    "dev": "npm --prefix frontend run dev",
-    "start": "npm --prefix frontend run preview"
+    "build": "cd frontend && npm install && npm run build",
+    "dev": "cd frontend && npm run dev",
+    "start": "cd frontend && npm run preview"
   }
 }
-

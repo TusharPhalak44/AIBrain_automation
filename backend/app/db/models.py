@@ -72,6 +72,19 @@ class AppSettings(Base):
         Integer, default=7200, nullable=False
     )  # Dynamic broker UTC offset (e.g. 7200 = GMT+2)
 
+    # Gemini Usage & Free Tier Switch
+    gemini_use_free_tier: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    # Remote MySQL Hosting & Backup Hub
+    remote_db_host: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    remote_db_port: Mapped[Optional[int]] = mapped_column(Integer, default=3306, nullable=True)
+    remote_db_user: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    remote_db_pass_enc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    remote_db_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    active_db_target: Mapped[str] = mapped_column(
+        String(16), default="LOCAL_XAMPP", nullable=False
+    )  # LOCAL_XAMPP or REMOTE_HOSTED
+
     updated_at_utc: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_utc, onupdate=now_utc, nullable=False
     )
@@ -419,6 +432,9 @@ class GeminiAnalysisReport(Base):
         String(32), default="PLANNED", nullable=False
     )  # EXECUTED, PLANNED, WAITING, NEWS_BLACKOUT, REJECTED, MONITOR_ONLY
     raw_snapshot_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    upcoming_setup_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    readiness_pct: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    watch_bias: Mapped[str] = mapped_column(String(32), default="NONE", nullable=False)
 
 
 class MacroNewsEvent(Base):
@@ -441,4 +457,63 @@ class MacroNewsEvent(Base):
     created_at_utc: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_utc, nullable=False
     )
+
+
+class GeminiModelRateCard(Base):
+    """Configurable rate card for Gemini token pricing and Free Tier eligibility."""
+
+    __tablename__ = "gemini_model_rate_cards"
+
+    model_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    input_per_1m_usd: Mapped[Decimal] = mapped_column(
+        Numeric(10, 4), default=Decimal("0.7500"), nullable=False
+    )
+    output_per_1m_usd: Mapped[Decimal] = mapped_column(
+        Numeric(10, 4), default=Decimal("3.7500"), nullable=False
+    )
+    cached_per_1m_usd: Mapped[Decimal] = mapped_column(
+        Numeric(10, 4), default=Decimal("0.0750"), nullable=False
+    )
+    is_free_tier_eligible: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    updated_at_utc: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, onupdate=now_utc, nullable=False
+    )
+
+
+class GeminiUsageLedger(Base):
+    """Detailed token consumption and USD cost accounting ledger for all Gemini API invocations."""
+
+    __tablename__ = "gemini_usage_ledger"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at_utc: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, nullable=False, index=True
+    )
+    ist_date: Mapped[str] = mapped_column(
+        String(10), nullable=False, index=True
+    )  # YYYY-MM-DD in Asia/Kolkata
+    account_type: Mapped[str] = mapped_column(
+        String(8), default="DEMO", nullable=False
+    )  # DEMO or LIVE
+    symbol: Mapped[str] = mapped_column(
+        String(32), default="GLOBAL", nullable=False
+    )  # e.g. GOLD#, EURUSD#, GLOBAL
+    model_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    call_purpose: Mapped[str] = mapped_column(
+        String(32), nullable=False
+    )  # LIVE_SCAN, MANUAL_SCAN, SL_FORENSICS, RULE_VALIDATION, KEY_TEST
+    billing_tier: Mapped[str] = mapped_column(
+        String(16), default="PAID", nullable=False
+    )  # PAID or FREE
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    thinking_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    cached_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    estimated_cost_usd: Mapped[Decimal] = mapped_column(
+        Numeric(12, 6), default=Decimal("0.000000"), nullable=False
+    )
+    latency_ms: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    http_status: Mapped[int] = mapped_column(Integer, default=200, nullable=False)
+    report_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
