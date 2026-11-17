@@ -381,6 +381,26 @@ class LearnedPairRule(Base):
     backtest_net_improvement_pct: Mapped[Decimal] = mapped_column(
         Numeric(5, 2), default=Decimal("0.00"), nullable=False
     )
+    profit_factor_before: Mapped[Decimal] = mapped_column(
+        Numeric(8, 2), default=Decimal("0.00"), nullable=False
+    )
+    profit_factor_after: Mapped[Decimal] = mapped_column(
+        Numeric(8, 2), default=Decimal("0.00"), nullable=False
+    )
+    net_r_delta: Mapped[Decimal] = mapped_column(
+        Numeric(8, 2), default=Decimal("0.00"), nullable=False
+    )
+    winners_preserved_pct: Mapped[Decimal] = mapped_column(
+        Numeric(5, 2), default=Decimal("100.00"), nullable=False
+    )
+    avoided_losses_usd: Mapped[Decimal] = mapped_column(
+        Numeric(14, 2), default=Decimal("0.00"), nullable=False
+    )
+    trigger_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    recent_profit_factor: Mapped[Decimal] = mapped_column(
+        Numeric(8, 2), default=Decimal("0.00"), nullable=False
+    )
+    shadow_scorecard_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at_utc: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_utc, nullable=False
     )

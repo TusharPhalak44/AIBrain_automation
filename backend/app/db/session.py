@@ -131,6 +131,22 @@ def init_db(bind_engine=None) -> None:
                     conn.commit()
                 except Exception:
                     pass
+            # learned_pair_rules migrations
+            for col, col_type in [
+                ("profit_factor_before", "DECIMAL(8,2) DEFAULT 0.00"),
+                ("profit_factor_after", "DECIMAL(8,2) DEFAULT 0.00"),
+                ("net_r_delta", "DECIMAL(8,2) DEFAULT 0.00"),
+                ("winners_preserved_pct", "DECIMAL(5,2) DEFAULT 100.00"),
+                ("avoided_losses_usd", "DECIMAL(14,2) DEFAULT 0.00"),
+                ("trigger_count", "INT DEFAULT 0"),
+                ("recent_profit_factor", "DECIMAL(8,2) DEFAULT 0.00"),
+                ("shadow_scorecard_json", "TEXT NULL"),
+            ]:
+                try:
+                    conn.execute(text(f"ALTER TABLE learned_pair_rules ADD COLUMN {col} {col_type};"))
+                    conn.commit()
+                except Exception:
+                    pass
     except Exception as e:
         logger.debug(f"Column check passed or ignored: {e}")
 
@@ -228,6 +244,12 @@ def init_db(bind_engine=None) -> None:
                 pair.enabled = True
                 pair.scalp_enabled = True
                 pair.swing_enabled = True
+
+        # Unbind static script FKs so live scanning relies 100% on pure price-action pattern detection + Gemini supervisory intelligence
+        for pb in session.query(TradingPairBot).all():
+            pb.scalp_strategy_id = None
+            pb.swing_strategy_id = None
+        session.commit()
 
         # Seed default PairPatternMemory scorecard records if empty
         existing_pm = session.query(PairPatternMemory).count()

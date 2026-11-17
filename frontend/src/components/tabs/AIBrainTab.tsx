@@ -41,84 +41,9 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
   const [isLoading, setIsLoading] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
   const [ruleActionLoading, setRuleActionLoading] = useState<number | null>(null);
-  const [isStaging, setIsStaging] = useState<number | null>(null);
-  const [actionLoading, setActionLoading] = useState<number | null>(null);
   const [upcomingData, setUpcomingData] = useState<any>({ actionable_setups: [], watchlist_radar: [] });
   const [radarSubView, setRadarSubView] = useState<"ALL" | "ACTIONABLE" | "WATCHLIST">("ALL");
   const toast = useToast();
-
-  const handleStageReport = async (rep: any) => {
-    if (!rep.entry_price || !rep.stop_loss) {
-      toast.warning("No Coordinates", "This report does not contain entry or stop-loss prices to stage.");
-      return;
-    }
-    setIsStaging(rep.id);
-    try {
-      const isSell = String(rep.decision).toUpperCase().includes("SELL");
-      const mode = rep.recommended_mode === "SWING" ? "SWING" : "SCALP";
-      await api.ai.stageCopilot({
-        symbol: rep.symbol,
-        mode: mode,
-        direction: isSell ? "SELL" : "BUY",
-        entry_price: rep.entry_price,
-        sl: rep.stop_loss,
-        tp1: rep.tp1 || rep.entry_price,
-        tp2: rep.tp2 || rep.entry_price,
-        lots: 0.01,
-        ai_analysis_summary: rep.thesis_text || `Staged from Gemini Report #${rep.id}`,
-      });
-      toast.success("Trade Staged", `Planned ${isSell ? "SELL" : "BUY"} setup staged into Copilot for ${rep.symbol}.`);
-      fetchBrainData();
-    } catch (e: any) {
-      toast.error("Staging Failed", e.message || String(e));
-    } finally {
-      setIsStaging(null);
-    }
-  };
-
-  const handleApproveCopilot = async (tradeId: number) => {
-    setActionLoading(tradeId);
-    try {
-      const res = await api.ai.approveCopilot(tradeId);
-      toast.success("Order Dispatched", res.message || `Copilot setup #${tradeId} executed on MT5.`);
-      fetchBrainData();
-    } catch (e: any) {
-      toast.error("Execution Failed", e.message || String(e));
-    } finally {
-      setActionLoading(null);
-    }
-  };
-
-  const handleRejectCopilot = async (tradeId: number) => {
-    try {
-      await api.ai.rejectCopilot(tradeId);
-      toast.info("Setup Dismissed", `Copilot setup #${tradeId} dismissed.`);
-      fetchBrainData();
-    } catch (e: any) {
-      toast.error("Dismiss Failed", e.message || String(e));
-    }
-  };
-
-  const handlePreStageUpcoming = async (item: any) => {
-    try {
-      const isSell = item.watch_bias === "BEARISH_WATCH";
-      await api.ai.stageCopilot({
-        symbol: item.symbol,
-        mode: item.setup_mode || "SCALP",
-        direction: isSell ? "SELL" : "BUY",
-        entry_price: item.planned_entry,
-        sl: item.planned_sl,
-        tp1: item.planned_tp1,
-        tp2: item.planned_tp2,
-        lots: 0.01,
-        ai_analysis_summary: item.trigger_condition || `Pre-staged limit from Gemini Radar`,
-      });
-      toast.success("Pre-Staged into Copilot", `Staged ${item.symbol} planned ${isSell ? "SELL" : "BUY"} limit order.`);
-      fetchBrainData();
-    } catch (e: any) {
-      toast.error("Pre-Staging Failed", e.message || String(e));
-    }
-  };
 
   const handleSendTelegramAlert = async (item: any) => {
     try {
@@ -334,7 +259,7 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
                   : "text-slate-400 hover:text-white"
               }`}
             >
-              Actionable Copilot ({upcomingData?.actionable_setups?.length || 0})
+              Actionable Limits ({upcomingData?.actionable_setups?.length || 0})
             </button>
             <button
               onClick={() => setRadarSubView("WATCHLIST")}
@@ -349,7 +274,7 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
           </div>
         </div>
 
-        {/* Section A: Actionable Copilot Setups */}
+        {/* Section A: Actionable Auto Setups & Pending Limits */}
         {(radarSubView === "ALL" || radarSubView === "ACTIONABLE") && (
           <div className="space-y-2.5">
             <div className="flex items-center justify-between text-xs">
@@ -357,7 +282,7 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
                 <Crosshair className="w-4 h-4" />
                 <span>Actionable Setups Ready for Execution ({upcomingData?.actionable_setups?.length || 0})</span>
               </span>
-              <span className="text-[11px] text-slate-500 font-mono">1-Click MT5 Broker Order Send</span>
+              <span className="text-[11px] text-slate-500 font-mono">Autonomous MT5 Market & Pending Limit Routing</span>
             </div>
 
             {upcomingData?.actionable_setups && upcomingData.actionable_setups.length > 0 ? (
@@ -458,7 +383,7 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
               </div>
             ) : (
               <div className="p-3 bg-slate-950/40 border border-slate-800/60 rounded-lg text-slate-500 text-xs text-center font-mono">
-                No setups currently staged in Copilot. Setups can be triggered automatically or pre-staged from the Watchlist Radar below.
+                No active limit orders currently pending execution. Setups are routed automatically via AUTO Mode or tracked on the Watchlist Radar below.
               </div>
             )}
           </div>
@@ -581,18 +506,16 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
                       <div className="flex gap-2 pt-1 border-t border-slate-800/60">
                         <button
                           onClick={() => handleSendTelegramAlert(item)}
-                          className="px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-slate-300 rounded-lg text-xs font-semibold border border-slate-800 transition"
+                          className="px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-slate-300 rounded-lg text-xs font-semibold border border-slate-800 transition flex items-center gap-1.5"
                           title="Broadcast setup alert to configured Telegram channel"
                         >
                           <Send className="w-3.5 h-3.5 text-blue-400" />
+                          <span>Telegram Alert</span>
                         </button>
-                        <button
-                          onClick={() => handlePreStageUpcoming(item)}
-                          className="flex-1 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5"
-                        >
-                          <Target className="w-3.5 h-3.5" />
-                          <span>Pre-Stage Limit in Copilot</span>
-                        </button>
+                        <div className="flex-1 py-1.5 bg-emerald-950/40 border border-emerald-800/40 text-emerald-300 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 font-mono">
+                          <Target className="w-3.5 h-3.5 text-emerald-400" />
+                          <span>AUTO Execution Monitored</span>
+                        </div>
                       </div>
                     </div>
                   );
@@ -682,8 +605,29 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
                         <strong className="text-white">{r.mode}</strong> | Expectancy:{" "}
                         <strong className="text-emerald-400">+{r.backtest_net_improvement_pct}%</strong>
                       </div>
+                      {/* Headless Shadow-Validation Scorecard */}
+                      <div className="bg-slate-950/90 rounded p-2 mt-1.5 border border-slate-800/80 text-[10px] grid grid-cols-2 gap-1.5 font-mono">
+                        <div>
+                          <span className="text-slate-500">PF: </span>
+                          <span className="text-amber-400 font-bold">{r.profit_factor_before ?? 1.0}</span>
+                          <span className="text-slate-600"> → </span>
+                          <span className="text-emerald-400 font-bold">{r.profit_factor_after ?? 1.5}</span>
+                        </div>
+                        <div>
+                          <span className="text-slate-500">Net R: </span>
+                          <span className="text-cyan-400 font-bold">+{r.net_r_delta ?? 0.0}R</span>
+                        </div>
+                        <div>
+                          <span className="text-slate-500">Winners: </span>
+                          <span className="text-slate-200 font-bold">{r.winners_preserved_pct ?? 100}% kept</span>
+                        </div>
+                        <div>
+                          <span className="text-slate-500">Avoided: </span>
+                          <span className="text-emerald-400 font-bold">${r.avoided_losses_usd ?? 0.0}</span>
+                        </div>
+                      </div>
                       {r.action?.reason && (
-                        <div className="text-[10px] text-slate-400 mt-1 italic">
+                        <div className="text-[10px] text-slate-400 mt-1.5 italic">
                           "{r.action.reason}"
                         </div>
                       )}
@@ -779,14 +723,10 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
                           <span className="text-emerald-400">TP1 (+1.5R): <strong className="text-emerald-300">{rep.tp1 ?? "-"}</strong></span>
                           {rep.tp2 && <span className="text-emerald-500">TP2: <strong className="text-emerald-400">{rep.tp2}</strong></span>}
                         </div>
-                        <button
-                          disabled={isStaging === rep.id}
-                          onClick={() => handleStageReport(rep)}
-                          className="px-2.5 py-1 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded text-[10px] shadow transition flex items-center gap-1 font-sans"
-                        >
-                          <Zap className="w-3 h-3 text-amber-300" />
-                          <span>{isStaging === rep.id ? "Staging..." : "Stage to Copilot / Execute"}</span>
-                        </button>
+                        <span className="px-2.5 py-1 bg-emerald-950/60 text-emerald-300 border border-emerald-800/40 font-bold rounded text-[10px] flex items-center gap-1 font-mono">
+                          <Zap className="w-3 h-3 text-emerald-400" />
+                          <span>AUTO Dispatch Engine</span>
+                        </span>
                       </div>
                     ) : null}
 

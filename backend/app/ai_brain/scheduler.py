@@ -473,6 +473,7 @@ class LiveIntervalScheduler:
         account_type: str,
         packet: Optional[MarketPacket] = None,
         db: Optional[Session] = None,
+        is_limit_order: bool = False,
     ) -> None:
         """
         Autonomous execution engine:
@@ -488,7 +489,6 @@ class LiveIntervalScheduler:
         fill_price = entry
         final_sl = float(sl)
         final_tp = float(tp2)
-        is_limit_order = False
 
         # Calculate ATR(14) from packet for drift detection
         atr14 = 0.0

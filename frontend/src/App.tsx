@@ -2,7 +2,6 @@ import React, { useState } from "react";
 import {
   LayoutDashboard,
   Brain,
-  Code2,
   BookOpen,
   BarChart3,
 } from "lucide-react";
@@ -11,13 +10,12 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { TopCommandBar } from "./components/TopCommandBar";
 import { CockpitTab } from "./components/tabs/CockpitTab";
 import { AIBrainTab } from "./components/tabs/AIBrainTab";
-import { StrategyLabTab } from "./components/tabs/StrategyLabTab";
 import { TradeBookTab } from "./components/tabs/TradeBookTab";
 import { UsageAnalyticsTab } from "./components/tabs/UsageAnalyticsTab";
 import { SettingsModal } from "./components/tabs/SettingsModal";
 import { ToastProvider, useToast } from "./components/Toast";
 
-type ActiveTab = "COCKPIT" | "AI_SUPERVISOR" | "STRATEGY_LAB" | "TRADE_BOOK" | "USAGE_BILLING";
+type ActiveTab = "COCKPIT" | "AI_SUPERVISOR" | "TRADE_BOOK" | "USAGE_BILLING";
 
 const AppContent: React.FC = () => {
   const store = useLiveStore();
@@ -102,18 +100,6 @@ const AppContent: React.FC = () => {
           </button>
 
           <button
-            onClick={() => setCurrentTab("STRATEGY_LAB")}
-            className={`flex items-center gap-2 py-3 px-4 border-b-2 transition ${
-              currentTab === "STRATEGY_LAB"
-                ? "border-blue-500 text-blue-400 font-bold bg-blue-950/20"
-                : "border-transparent text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            <Code2 className="w-4 h-4" />
-            <span>STRATEGY LAB & $100 TESTER</span>
-          </button>
-
-          <button
             onClick={() => setCurrentTab("TRADE_BOOK")}
             className={`flex items-center gap-2 py-3 px-4 border-b-2 transition ${
               currentTab === "TRADE_BOOK"
@@ -173,10 +159,6 @@ const AppContent: React.FC = () => {
               selectedSymbol={store.selectedSymbol}
               pairSchedules={store.pairSchedules}
             />
-          )}
-
-          {currentTab === "STRATEGY_LAB" && (
-            <StrategyLabTab selectedSymbol={store.selectedSymbol} />
           )}
 
           {currentTab === "TRADE_BOOK" && <TradeBookTab />}

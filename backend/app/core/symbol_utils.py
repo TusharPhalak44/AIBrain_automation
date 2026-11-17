@@ -4,6 +4,9 @@ import urllib.parse
 from sqlalchemy.orm import Session
 from backend.app.db.models import TradingPairBot
 
+# Strict 2-Pair Focus: Gold & Bitcoin ONLY
+XM_ACTIVE_SYMBOLS = ["GOLD#", "BTCUSD#"]
+
 
 def resolve_broker_symbol(symbol: str, db: Session) -> str:
     """
