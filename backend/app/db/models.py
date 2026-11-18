@@ -37,7 +37,7 @@ class AppSettings(Base):
         String(64), default="gemini-3.8-flash", nullable=False
     )
     gemini_forensic_model: Mapped[str] = mapped_column(
-        String(64), default="gemini-3.1-pro-preview", nullable=False
+        String(64), default="gemini-3.8-flash", nullable=False
     )
     global_scan_interval_sec: Mapped[int] = mapped_column(Integer, default=300, nullable=False)
 

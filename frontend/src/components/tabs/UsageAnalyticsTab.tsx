@@ -259,8 +259,9 @@ export const UsageAnalyticsTab: React.FC = () => {
         >
           <option value="">All Models</option>
           <option value="gemini-3.8-flash">Gemini 3.8 Flash</option>
-          <option value="gemini-3-flash-preview">Gemini 3 Flash Preview</option>
+          <option value="gemini-3.6-flash">Gemini 3.6 Flash</option>
           <option value="gemini-3.5-flash-lite">Gemini 3.5 Flash Lite</option>
+          <option value="gemini-3-flash-preview">Gemini 3 Flash Preview</option>
           <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro Preview</option>
           <option value="gemini-4-argon">Gemini 4 Argon</option>
         </select>

@@ -160,23 +160,23 @@ def init_db(bind_engine=None) -> None:
                 active_account_type="DEMO",
                 execution_mode="AUTO",
                 gemini_live_model="gemini-3.8-flash",
-                gemini_forensic_model="gemini-3.1-pro-preview",
+                gemini_forensic_model="gemini-3.8-flash",
                 global_scan_interval_sec=300,
                 display_timezone=settings.DISPLAY_TIMEZONE,
                 broker_tz_offset_sec=settings.BROKER_TZ_OFFSET_SEC,
             )
             session.add(default_settings)
         else:
-            # Auto-migrate retired modes and models
+            # Auto-migrate retired modes and models (strictly Free-tier safe GA models)
             changed = False
             if existing_settings.execution_mode in ["COPILOT", "MONITOR"]:
                 existing_settings.execution_mode = "AUTO"
                 changed = True
-            if "gemini-2.5" in existing_settings.gemini_live_model:
+            if not existing_settings.gemini_live_model or "gemini-2.5" in existing_settings.gemini_live_model or "gemini-3.1-pro" in existing_settings.gemini_live_model:
                 existing_settings.gemini_live_model = "gemini-3.8-flash"
                 changed = True
-            if "gemini-2.5" in existing_settings.gemini_forensic_model or "gemini-2.0" in existing_settings.gemini_forensic_model:
-                existing_settings.gemini_forensic_model = "gemini-3.1-pro-preview"
+            if not existing_settings.gemini_forensic_model or "gemini-2.5" in existing_settings.gemini_forensic_model or "gemini-2.0" in existing_settings.gemini_forensic_model or "gemini-3.1-pro" in existing_settings.gemini_forensic_model:
+                existing_settings.gemini_forensic_model = "gemini-3.8-flash"
                 changed = True
             if changed:
                 session.commit()
@@ -284,6 +284,7 @@ def init_db(bind_engine=None) -> None:
         # Seed Gemini Model Rate Cards
         default_rate_cards = [
             ("gemini-3.8-flash", Decimal("0.75"), Decimal("3.75"), Decimal("0.075"), True),
+            ("gemini-3.6-flash", Decimal("0.50"), Decimal("3.00"), Decimal("0.05"), True),
             ("gemini-3-flash-preview", Decimal("0.50"), Decimal("3.00"), Decimal("0.05"), True),
             ("gemini-3.5-flash-lite", Decimal("0.30"), Decimal("2.50"), Decimal("0.03"), True),
             ("gemini-3.1-pro-preview", Decimal("2.00"), Decimal("12.00"), Decimal("0.20"), False),

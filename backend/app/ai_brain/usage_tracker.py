@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_RATES: Dict[str, Tuple[Decimal, Decimal, Decimal, bool]] = {
     # model_id: (input_rate, output_rate, cached_rate, is_free_tier_eligible)
     "gemini-3.8-flash": (Decimal("0.75"), Decimal("3.75"), Decimal("0.075"), True),
+    "gemini-3.6-flash": (Decimal("0.50"), Decimal("3.00"), Decimal("0.05"), True),
     "gemini-3-flash-preview": (Decimal("0.50"), Decimal("3.00"), Decimal("0.05"), True),
     "gemini-3.5-flash-lite": (Decimal("0.30"), Decimal("2.50"), Decimal("0.03"), True),
     "gemini-3.1-pro-preview": (Decimal("2.00"), Decimal("12.00"), Decimal("0.20"), False),

@@ -294,7 +294,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     try {
       const keyToSend = geminiApiKey && geminiApiKey !== "••••••••" ? geminiApiKey.trim() : undefined;
       const res = await api.settings.testGemini(keyToSend, geminiModel);
-      setGeminiTestStatus(`Verified in ${res.latency_ms}ms (${res.model})`);
+      const modelTested = res.tested_model || res.model || geminiModel;
+      setGeminiTestStatus(`Verified in ${res.latency_ms}ms (${modelTested})`);
       toast.success("Gemini API Key Verified", res.message);
     } catch (e: any) {
       setGeminiTestStatus(`Failed: ${e.message}`);
@@ -557,12 +558,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <select
                   value={geminiModel}
                   onChange={(e) => setGeminiModel(e.target.value)}
-                  className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-slate-100 font-semibold"
+                  className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-slate-100 font-semibold text-xs"
                 >
-                  <option value="gemini-3.8-flash">gemini-3.8-flash (Recommended: Low Latency Live Scanner)</option>
-                  <option value="gemini-3-flash-preview">gemini-3-flash-preview (Gemini 3 Flash Preview)</option>
-                  <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite (Ultra-Low Latency)</option>
-                  <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview (Recommended: Deep Quantitative & Forensics)</option>
+                  <option value="gemini-3.8-flash">gemini-3.8-flash (Recommended: Low Latency Live Scanner - Free & Paid)</option>
+                  <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite (Ultra-Low Latency - Free & Paid)</option>
+                  <option value="gemini-3.6-flash">gemini-3.6-flash (Fast Multimodal - Free & Paid)</option>
+                  <option value="gemini-3-flash-preview">gemini-3-flash-preview (Gemini 3 Preview - Free Tier Safe)</option>
+                  <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview (Paid Billing Tier Only: Deep Reasoning)</option>
                 </select>
               </div>
 

@@ -136,15 +136,15 @@ class GeminiSupervisor:
             if not st or not st.gemini_api_key_enc:
                 return None, self._model_name
 
-            raw_key = crypto_vault.decrypt_secret(st.gemini_api_key_enc)
-            raw_model = (st.gemini_live_model or "gemini-3.8-flash").replace("models/", "")
-            # Auto-migrate deprecated 2.5 models
-            if "2.5" in raw_model:
+            raw_key = crypto_vault.decrypt_secret(st.gemini_api_key_enc).strip()
+            raw_model = (st.gemini_live_model or "gemini-3.8-flash").strip().removeprefix("models/")
+            # Auto-migrate deprecated 2.5 or 3.1-pro models in live setting
+            if "2.5" in raw_model or "2.0" in raw_model or "3.1-pro" in raw_model:
                 raw_model = "gemini-3.8-flash"
             self._model_name = raw_model
 
             if raw_key != self._cached_api_key or self._client is None:
-                self._client = genai.Client(api_key=raw_key)
+                self._client = genai.Client(api_key=raw_key, http_options={"api_version": "v1beta"})
                 self._cached_api_key = raw_key
                 logger.info(f"Initialized google-genai Client with model: {self._model_name}")
 
@@ -505,13 +505,13 @@ class GeminiSupervisor:
                         f"Provide your structured supervisory judgment conforming strictly to the response schema."
                     )
 
-                    # Candidate models fallback chain
-                    clean_m = model_name.replace("models/", "")
-                    candidates = [clean_m, "gemini-3.8-flash", "gemini-3-flash-preview", "gemini-3.1-pro-preview"]
+                    # Candidate models fallback chain (Free-tier safe GA models ONLY)
+                    clean_m = model_name.strip().removeprefix("models/")
+                    candidates = [clean_m, "gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3-flash-preview"]
                     seen = set()
                     ordered_models = []
                     for m in candidates:
-                        if m not in seen:
+                        if m and m not in seen and "3.1-pro" not in m:
                             seen.add(m)
                             ordered_models.append(m)
 
@@ -529,7 +529,6 @@ class GeminiSupervisor:
                                     system_instruction=SUPERVISOR_SYSTEM_PROMPT,
                                     response_mime_type="application/json",
                                     response_schema=GeminiSupervisoryOutput,
-                                    temperature=0.2,
                                 ),
                             )
                             latency_ms = int((time.perf_counter() - t0) * 1000)

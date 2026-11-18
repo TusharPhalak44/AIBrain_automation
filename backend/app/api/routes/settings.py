@@ -166,10 +166,11 @@ def list_gemini_models(db: Session = Depends(get_db)):
     """List available Gemini 3.x models for the configured API key with recommended defaults."""
     st = db.query(AppSettings).filter_by(id=1).first()
     default_models = [
-        {"id": "gemini-3.8-flash", "display_name": "Gemini 3.8 Flash (Live Recommended: Sub-Second Latency)"},
-        {"id": "gemini-3-flash-preview", "display_name": "Gemini 3 Flash Preview"},
-        {"id": "gemini-3.5-flash-lite", "display_name": "Gemini 3.5 Flash Lite (Ultra-Low Latency)"},
-        {"id": "gemini-3.1-pro-preview", "display_name": "Gemini 3.1 Pro Preview (Forensic/Pro: Deep Reasoning)"},
+        {"id": "gemini-3.8-flash", "display_name": "gemini-3.8-flash (Recommended: Low Latency Live Scanner - Free & Paid)"},
+        {"id": "gemini-3.5-flash-lite", "display_name": "gemini-3.5-flash-lite (Ultra-Low Latency - Free & Paid)"},
+        {"id": "gemini-3.6-flash", "display_name": "gemini-3.6-flash (Fast Multimodal - Free & Paid)"},
+        {"id": "gemini-3-flash-preview", "display_name": "gemini-3-flash-preview (Gemini 3 Preview - Free Tier Safe)"},
+        {"id": "gemini-3.1-pro-preview", "display_name": "gemini-3.1-pro-preview (Paid Billing Tier Only: Deep Reasoning)"},
     ]
 
     if not st or not st.gemini_api_key_enc:
@@ -177,10 +178,11 @@ def list_gemini_models(db: Session = Depends(get_db)):
 
     try:
         key = crypto_vault.decrypt_secret(st.gemini_api_key_enc)
-        test_client = genai.Client(api_key=key)
+        test_client = genai.Client(api_key=key.strip(), http_options={"api_version": "v1beta"})
         fetched_models = []
         for m in test_client.models.list():
-            name = m.name.replace("models/", "") if hasattr(m, "name") else str(m)
+            raw_name = m.name if hasattr(m, "name") else str(m)
+            name = raw_name.strip().removeprefix("models/")
             disp = getattr(m, "display_name", name)
             if "gemini" in name.lower() and ("3" in name.lower() or "flash" in name.lower() or "pro" in name.lower()):
                 fetched_models.append({"id": name, "display_name": f"{disp} ({name})"})
@@ -197,6 +199,7 @@ def list_gemini_models(db: Session = Depends(get_db)):
 def test_gemini_key(payload: Optional[TestGeminiKeySchema] = None, db: Session = Depends(get_db)):
     """
     Test Gemini API key validity and measure response latency via official google-genai SDK.
+    Explicitly tests the user's selected/provided model using the v1beta endpoint.
     """
     st = db.query(AppSettings).filter_by(id=1).first()
     key_to_test = None
@@ -216,56 +219,48 @@ def test_gemini_key(payload: Optional[TestGeminiKeySchema] = None, db: Session =
         )
 
     raw_model = (payload.model if payload and payload.model else None) or (st.gemini_live_model if st else "gemini-3.8-flash")
-    model_to_use = raw_model.replace("models/", "")
-    if "2.5" in model_to_use:
-        model_to_use = "gemini-3.8-flash"
+    target_model = raw_model.strip().removeprefix("models/")
+    if "2.5" in target_model or "2.0" in target_model:
+        target_model = "gemini-3.8-flash"
 
-    # Candidates for fallback
-    candidates = [model_to_use, "gemini-3.8-flash", "gemini-3-flash-preview", "gemini-3.1-pro-preview"]
-    seen = set()
-    ordered_models = []
-    for m in candidates:
-        if m not in seen:
-            seen.add(m)
-            ordered_models.append(m)
+    # Direct test of the requested model via v1beta
+    test_client = genai.Client(api_key=key_to_test.strip(), http_options={"api_version": "v1beta"})
 
-    test_client = genai.Client(api_key=key_to_test)
-    last_err = None
-
-    for candidate_model in ordered_models:
+    try:
+        t0 = time.perf_counter()
+        resp = test_client.models.generate_content(
+            model=target_model,
+            contents="State 'CONNECTED' in one word.",
+        )
+        latency_ms = int((time.perf_counter() - t0) * 1000)
+        reply_text = resp.text.strip() if resp and resp.text else "CONNECTED"
         try:
-            t0 = time.perf_counter()
-            resp = test_client.models.generate_content(
-                model=candidate_model,
-                contents="State 'CONNECTED' in one word.",
+            record_gemini_usage(
+                db=db,
+                model_id=target_model,
+                call_purpose="KEY_TEST",
+                response=resp,
+                latency_ms=latency_ms,
+                symbol="GLOBAL",
             )
-            latency_ms = int((time.perf_counter() - t0) * 1000)
-            reply_text = resp.text.strip() if resp and resp.text else "CONNECTED"
-            try:
-                record_gemini_usage(
-                    db=db,
-                    model_id=candidate_model,
-                    call_purpose="KEY_TEST",
-                    response=resp,
-                    latency_ms=latency_ms,
-                    symbol="GLOBAL",
-                )
-            except Exception:
-                pass
-            return {
-                "status": "SUCCESS",
-                "message": f"Successfully verified Gemini API key on model '{candidate_model}' in {latency_ms}ms.",
-                "model": candidate_model,
-                "latency_ms": latency_ms,
-                "response_text": reply_text,
-            }
-        except Exception as e:
-            last_err = e
-
-    raise HTTPException(
-        status_code=400,
-        detail={
-            "error": "GEMINI_TEST_FAILED",
-            "message": f"Gemini API verification failed: {str(last_err)}",
-        },
-    )
+        except Exception:
+            pass
+        return {
+            "status": "SUCCESS",
+            "ok": True,
+            "message": f"Successfully verified Gemini API key on model '{target_model}' in {latency_ms}ms.",
+            "model": target_model,
+            "tested_model": target_model,
+            "latency_ms": latency_ms,
+            "response_text": reply_text,
+        }
+    except Exception as e:
+        err_msg = str(e)
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "GEMINI_TEST_FAILED",
+                "model": target_model,
+                "message": f"Gemini API verification failed on '{target_model}': {err_msg}",
+            },
+        )
