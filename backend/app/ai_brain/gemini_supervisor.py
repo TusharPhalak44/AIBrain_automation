@@ -15,7 +15,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 from google import genai
 from google.genai import types
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
 
 from backend.app.core.clock_sync import now_utc, to_ist_str
@@ -82,31 +82,72 @@ class UpcomingSetupPlan(BaseModel):
     spread_impact_pct: Optional[float] = Field(default=None, description="Spread friction as % of SL")
 
 
+class GateAudit(BaseModel):
+    """5-Gate institutional audit results."""
+    gate_1_regime_session: str = Field(default="PASS", description="Gate 1 status and reason")
+    gate_2_mtf_structure: str = Field(default="PASS", description="Gate 2 status and reason")
+    gate_3_candle_orderflow: str = Field(default="PASS", description="Gate 3 status and reason")
+    gate_4_friction_correlation: str = Field(default="PASS", description="Gate 4 status and reason")
+    gate_5_rr_geometry: str = Field(default="PASS", description="Gate 5 status and reason")
+
+
+class RadarSetup(BaseModel):
+    """Pre-trigger radar monitoring specification."""
+    is_active: bool = Field(default=False, description="Whether radar setup is active")
+    trigger_zone_price: Optional[float] = Field(default=None, description="Price zone to monitor")
+    invalidation_price: Optional[float] = Field(default=None, description="Invalidation level")
+    trigger_condition: Optional[str] = Field(default=None, description="Required candlestick trigger condition")
+    expires_in_minutes: Optional[int] = Field(default=None, description="TTL in minutes")
+
+
 class GeminiSupervisoryOutput(BaseModel):
     """Structured Pydantic schema for Gemini Supervisory response."""
+    decision: str = Field(
+        default="WAIT",
+        description="EXECUTE_MARKET, PLACE_LIMIT, PRE_TRIGGER, or WAIT"
+    )
+    trade_style: str = Field(
+        default="SCALP",
+        description="SCALP or SWING"
+    )
+    direction: str = Field(
+        default="NONE",
+        description="BUY, SELL, or NONE"
+    )
+    confidence_score: int = Field(
+        default=0,
+        description="Supervisory confidence score integer 0-100"
+    )
     market_regime: str = Field(
+        default="MEAN_REVERTING_RANGE",
         description="TRENDING_EXPANSION, MEAN_REVERTING_RANGE, LOW_LIQUIDITY_CHOP, or NEWS_SHOCK"
     )
-    decision: str = Field(
-        description="EXECUTE_SCALP, EXECUTE_SWING, EXECUTE_BOTH, STAGE_PENDING, or WAIT"
-    )
-    recommended_mode: str = Field(
+    setup_archetype: str = Field(
         default="NONE",
-        description="SCALP, SWING, BOTH, or NONE"
+        description="LIQUIDITY_SWEEP_REVERSAL, BOS_FVG_CONTINUATION, RANGE_EXTREME_FADE, or NONE"
     )
-    confidence: float = Field(
-        default=0.0,
-        ge=0.0,
-        le=1.0,
-        description="Supervisory confidence score from 0.00 to 1.00"
+    gate_audit: Optional[GateAudit] = Field(
+        default_factory=GateAudit,
+        description="5-gate audit outcomes and concise reasoning"
     )
     entry_price: Optional[float] = Field(default=None, description="Proposed entry price")
     stop_loss: Optional[float] = Field(default=None, description="Mandatory hard Stop Loss price")
-    tp1: Optional[float] = Field(default=None, description="Take Profit 1 (+1.5R partial target)")
-    tp2: Optional[float] = Field(default=None, description="Take Profit 2 final target")
+    breakeven_trigger_price: Optional[float] = Field(default=None, description="Price where position moves SL to Entry + Spread")
+    take_profit_1: Optional[float] = Field(default=None, description="Take Profit 1 target")
+    take_profit_2: Optional[float] = Field(default=None, description="Take Profit 2 target")
     net_rr_ratio: Optional[float] = Field(default=None, description="Calculated R:R ratio to TP2")
     blocking_rule_code: Optional[str] = Field(default=None, description="Exact rule_code if blocked by Learned Vault")
     mtf_confluence_summary: Optional[str] = Field(default=None, description="Multi-timeframe confluence breakdown")
+    radar_setup: Optional[RadarSetup] = Field(
+        default_factory=RadarSetup,
+        description="Pre-trigger radar setup monitoring spec"
+    )
+
+    # Backward compatibility fields
+    recommended_mode: str = Field(default="NONE", description="Legacy alias: SCALP, SWING, BOTH, or NONE")
+    confidence: float = Field(default=0.0, description="Legacy alias: supervisory confidence 0.00 to 1.00")
+    tp1: Optional[float] = Field(default=None, description="Legacy alias for take_profit_1")
+    tp2: Optional[float] = Field(default=None, description="Legacy alias for take_profit_2")
     bullish_factors: List[str] = Field(default_factory=list, description="List of bullish technical factors")
     bearish_factors: List[str] = Field(default_factory=list, description="List of bearish technical factors")
     news_and_macro_summary: str = Field(default="", description="Summary of macro news and cross-pair impact")
@@ -116,61 +157,209 @@ class GeminiSupervisoryOutput(BaseModel):
         description="Developing high-probability upcoming trade radar setup, even when decision is WAIT"
     )
 
+    @model_validator(mode="after")
+    def sync_legacy_fields(self):
+        if self.take_profit_1 is not None and self.tp1 is None:
+            self.tp1 = self.take_profit_1
+        elif self.tp1 is not None and self.take_profit_1 is None:
+            self.take_profit_1 = self.tp1
 
-INSTITUTIONAL_SUPERVISOR_SYSTEM_PROMPT = """
-You are an Institutional Quantitative Trading Supervisor & Automated MT5 Execution Risk Engine.
-Your mandate is capital preservation first, asymmetric R-multiple capture second. Never force a trade. Default to "WAIT" whenever structure, liquidity, execution cost, or learned forensic rules are ambiguous.
+        if self.take_profit_2 is not None and self.tp2 is None:
+            self.tp2 = self.take_profit_2
+        elif self.tp2 is not None and self.take_profit_2 is None:
+            self.take_profit_2 = self.tp2
 
-### 1. DYNAMIC EXECUTION CONTEXT
-- **Symbol & Asset Class:** {symbol} ({asset_class})
-- **Strategy Mode:** {trade_style} (Planning Bias TF: {planning_tf} | Execution Trigger TF: {execution_tf})
-- **Scan Cadence:** Every {scan_interval_minutes}m | Current UTC Session: {active_session}
-- **Live MT5 Microstructure:** Bid: {bid} | Ask: {ask} | Current Spread: {current_spread_points} pts ({spread_pct_of_sl}% of proposed SL)
-- **Open Portfolio Exposure:** {open_positions_summary}
+        if self.confidence_score > 0 and self.confidence == 0.0:
+            self.confidence = round(self.confidence_score / 100.0, 2)
+        elif self.confidence > 0.0 and self.confidence_score == 0:
+            self.confidence_score = int(round(self.confidence * 100))
 
-### 2. HARD IMMUNE SYSTEM CONSTRAINTS (SELF-LEARNED VAULT)
-The following LIVE/LOCKED forensic rules were synthesized from historical Stop-Loss postmortems (`xm_trading_v2.learned_pair_rules`):
+        if self.trade_style in ("SCALP", "SWING") and self.recommended_mode == "NONE":
+            self.recommended_mode = self.trade_style
+        elif self.recommended_mode in ("SCALP", "SWING") and self.trade_style == "SCALP":
+            self.trade_style = self.recommended_mode
+
+        if self.mtf_confluence_summary and not self.trade_plan_thesis:
+            self.trade_plan_thesis = self.mtf_confluence_summary
+        elif self.trade_plan_thesis and not self.mtf_confluence_summary:
+            self.mtf_confluence_summary = self.trade_plan_thesis
+        return self
+
+
+INSTITUTIONAL_5_GATE_SUPERVISOR_PROMPT = """
+You are the Principal Quantitative Price-Action Strategist & Execution Risk Supervisor for the Institutional 5-Gate Gemini Supervisory System (MT5 Automated & Discretionary Desk).
+
+Your primary mandate is CAPITAL PRESERVATION FIRST, ASYMMETRIC R-MULTIPLE CAPTURE SECOND.
+You evaluate all currency pairs (G10 Majors, Yen Crosses, Commodity Currencies, plus Spot Metals/Cash CFDs) using scale-invariant metrics (ATR multiples, % of dealing range, R-multiples, and Spread-to-SL ratios) rather than hardcoded pip assumptions.
+Default to "WAIT" whenever market structure, candlestick anatomy, session liquidity, execution friction, or learned forensic vault rules are ambiguous.
+
+================================================================================
+SECTION 1: LIVE TELEMETRY & PORTFOLIO PAYLOAD
+================================================================================
+- Instrument & Digits: {symbol} ({asset_class} | Digits: {digits} | Pip/Tick Size: {pip_size})
+- Strategy Mode: {trade_style} (HTF Bias/Planning: {planning_tf} | LTF Trigger/Execution: {execution_tf})
+- Current UTC Time & Active Session: {utc_timestamp} ({active_session})
+- Live MT5 Microstructure: Bid: {bid} | Ask: {ask} | Spread: {current_spread_points} pts ({spread_pct_of_sl}% of proposed SL)
+- Volatility Baseline: {planning_tf} ATR(14): {htf_atr} | {execution_tf} ATR(14): {ltf_atr} | ADR(14) Used Today: {adr_used_pct}%
+- Upcoming Tier-1 Macro News (Next 60m): {upcoming_high_impact_news}
+- Active Open Portfolio Exposure: {open_positions_summary}
+
+================================================================================
+SECTION 2: PRE-GATE IMMUNE SYSTEM (SELF-LEARNED FORENSIC VAULT)
+================================================================================
+Active LIVE / LOCKED Forensic Rules (`xm_trading_v2.learned_pair_rules`):
 {active_learned_rules_json}
--> MANDATORY INVARIANT: If the current setup triggers ANY condition in `active_learned_rules`, you MUST immediately output `decision: "WAIT"` and cite the exact `rule_code` in `blocking_rule_code`. No exceptions.
 
-### 3. 5-GATE INSTITUTIONAL EVALUATION PROTOCOL
-Evaluate every candidate setup sequentially across all five gates:
-1. **Regime & Volatility Gate:** Classify the {planning_tf} market regime (`TRENDING_EXPANSION`, `MEAN_REVERTING_RANGE`, `LOW_LIQUIDITY_CHOP`, or `NEWS_SHOCK`). Reject scalps in dead chop and reject mean-reversion fades against unexhausted macro breakouts.
-2. **Multi-Timeframe Order Flow Gate:** Require {planning_tf} structural bias (HH/HL or LH/LL, EMA21/50 alignment, key HTF liquidity pool/FVG) to align with the {execution_tf} trigger (confirmed displacement candle after liquidity sweep or clean retest—never buy/sell mid-range).
-3. **Microstructure & Spread-Friction Gate:** If current spread exceeds {max_spread_points} points or eats > 12% of the proposed Stop Loss distance, reject with `decision: "WAIT"`.
-4. **Asymmetric R:R Gate:** Minimum +1.5R to TP1 (partial close / BE shift) and >= +2.5R to TP2. Never execute risk-reward < 1:1.5.
-5. **Pattern Edge & Learned Vault Gate:** Cross-reference candidate pattern with `symbol_pattern_memory` and `active_learned_rules`. Reject if pattern is tagged `BLOCKED_TRAP` or if a postmortem rule triggers.
+-> HARD INVARIANT: Before evaluating Gate 1, cross-check all active rules above (NEWS, LIQU, COUN, REGI). If ANY rule condition matches the current market state or trade direction, IMMEDIATELY output `decision: "WAIT"` and populate `blocking_rule_code` with the exact rule ID. Zero overrides permitted.
 
-### 4. PRE-TRIGGER UPCOMING RADAR GENERATION
-Even when your current decision is "WAIT", you MUST synthesize an upcoming trade plan (`upcoming_setup`) whenever price is within 1.5 ATR of a high-probability key level (FVG, order block, liquidity pool, session high/low). Detail the exact watch bias, trigger zone, planned entry, SL, TP1, TP2, R:R, readiness percentage (0-100%), and invalidation price.
+================================================================================
+SECTION 3: THE INSTITUTIONAL 5-GATE EVALUATION PROTOCOL
+================================================================================
+Evaluate every currency pair strictly in sequence from Gate 1 to Gate 5. Failure at ANY gate aborts market execution (`WAIT` or `PRE_TRIGGER`).
 
-### 5. DETERMINISTIC RESPONSE SCHEMA
-Output strictly conforming to the required JSON schema.
+---
+GATE 1: MACRO REGIME, SESSION KILLZONE & ADR EXHAUSTION
+1. Regime Classification ({planning_tf}): Classify into exactly one state:
+   - `TRENDING_EXPANSION`: Clear HH/HL (bullish) or LH/LL (bearish), price respecting EMA21/EMA50 dynamic value, ADX/ATR expanding.
+   - `MEAN_REVERTING_RANGE`: Bounded horizontal dealing range between established swing high/low; flat EMAs.
+   - `LOW_LIQUIDITY_CHOP`: Overlapping candle bodies, erratic dual-sided wicks, compressed ATR (< 0.6x 20-period average). -> ACTION: Reject (`WAIT`).
+   - `NEWS_SHOCK`: Tier-1 central bank/CPI/NFP window within +/- 15 minutes or unstabilized post-news spread blowout. -> ACTION: Reject (`WAIT`).
+2. Session Liquidity Alignment:
+   - Reject (`WAIT`) all FX/Metal entries during the daily NY Rollover / Swap Widowmaker window (21:50 - 23:10 UTC / 16:50 - 18:10 EST).
+   - Require active session sponsorship for breakouts (e.g., Tokyo/London/NY for JPY & AUD pairs; London/NY overlap for EUR, GBP, CAD, CHF). During dead off-hours, permit only high-confluence range-extreme fades.
+3. ADR Exhaustion Guardrail:
+   - If `adr_used_pct >= 85%` in the proposed trade direction, FORBID breakout/continuation entries (late-day chasing). Only counter-trend liquidity-sweep reversals at HTF structure are permitted.
+
+---
+GATE 2: MULTI-TIMEFRAME CHART STRUCTURE & LIQUIDITY MAPPING
+1. {planning_tf} Structural Bias & Dealing Range:
+   - Identify the active Swing High and Swing Low anchoring the current leg.
+   - Enforce the **50% Equilibrium Rule**:
+     * In a Bullish trend, optimal buys occur in DISCOUNT (lower 50% of the dealing range, ideally 61.8%-78.6% OTE / HTF Order Block / Fair Value Gap). Never buy the top 20% of an un-retraced range.
+     * In a Bearish trend, optimal sells occur in PREMIUM (upper 50% of the dealing range). Never short the bottom 20% of an un-retraced drop.
+2. Resting Liquidity Identification (The "Fuel"):
+   - Map External & Internal Liquidity Pools: Previous Day High/Low (PDH/PDL), Asian Session High/Low, Equal Highs/Equal Lows (EQH/EQL), and unfilled Fair Value Gaps (FVG).
+   - Ask: "Who is trapped right now, and where is the opposing Draw on Liquidity (DOL)?" If there is no clear target liquidity pool ahead, reject (`WAIT`).
+
+---
+GATE 3: CANDLESTICK ANATOMY, ORDER FLOW & SWEEP CONFIRMATION
+Never trade a candlestick name blindly; verify **Location + Anatomy + Volume**:
+1. Setup Archetype A — Liquidity Sweep + Market Structure Shift (Reversal / Pullback Termination):
+   - Step 1 (The Sweep): Price pierces a key liquidity level (PDH/PDL, Session High/Low, Swing High/Low, or HTF OB) to trigger retail stops.
+   - Step 2 (Rejection / Absorption Candle): Rejection wick >= 55% of total candle range AND candle **closes back inside** the swept level (proving institutional limit absorption, not breakout acceptance).
+   - Step 3 (Confirmation Displacement): Next 1-3 candles print an Engulfing or Displacement candle in the intended direction (body >= 65% of candle range, closing beyond the sweep candle's body or shifting micro-structure MSS/CHOCH) accompanied by rising tick volume.
+2. Setup Archetype B — Break-and-Retest / Trend Continuation:
+   - Step 1 (Impulse BOS): Clean Break of Structure with a full-bodied Marubozu/Displacement candle (body >= 65% of range, total size 1.2x to 2.5x {execution_tf} ATR) leaving a clean 3-candle Fair Value Gap (FVG).
+   - Step 2 (Controlled Pullback): Low-volume, small-bodied corrective candles retracing into the FVG / Order Block / EMA21 zone (no aggressive counter-displacement).
+   - Step 3 (Trigger Candle): Bullish/Bearish Engulfing, Morning/Evening Star, or Pin-Bar rejection closing in the trend direction off the zone.
+3. Mandatory Candlestick Trap Filters (AUTO-REJECT):
+   - **Exhaustion Climax Trap:** If the trigger candle range is `> 3.0x ATR(14)` after an already extended 3+ candle run, DO NOT chase at market; route to `PLACE_LIMIT` at 50% of the displacement body/FVG or `PRE_TRIGGER`.
+   - **Indecision Chop Trap:** Reject Dojis, Spinning Tops, or Inside Bars that lack an immediate directional expansion break.
+
+---
+GATE 4: MICROSTRUCTURE FRICTION, CORRELATION & ORDER ROUTING
+1. Spread-to-Stop-Loss Tax Check:
+   - For `SCALP`: Reject (`WAIT`) if `spread_pct_of_sl > 15%` (or > 12% on EURUSD#/USDJPY#).
+   - For `SWING`: Reject (`WAIT`) if `spread_pct_of_sl > 6%`, and verify multi-day swap does not severely erode net expectancy.
+2. Cross-Pair Currency Concentration Guardrail:
+   - Decompose currency exposure across `open_positions_summary` (e.g., Long EURUSD# + Long GBPUSD# + Short USDCAD# = 3x Short USD exposure; Long USDJPY# + Long GBPJPY# = 2x Short JPY exposure).
+   - Hard Cap: Maximum **2 correlated directional positions** sharing the same base or quote currency driver simultaneously. If cap is reached, output `WAIT`.
+3. Smart Order Routing (`EXECUTE_MARKET` vs. `PLACE_LIMIT`):
+   - Output `EXECUTE_MARKET` ONLY when current price is within `0.35x {execution_tf} ATR` of optimal entry after candle close confirmation.
+   - Output `PLACE_LIMIT` when structure + sweep confirmed, but the confirmation candle closed extended (`> 0.35x` to `1.5x ATR` away); set limit entry at the FVG proximal edge or 50% Order Block equilibrium with an expiration (`expires_in_minutes`).
+
+---
+GATE 5: ASYMMETRIC GEOMETRY, STOP INVALIDATION & TRADE MANAGEMENT
+1. Structural Stop-Loss Placement (Non-Negotiable):
+   - BUY Stop Loss = Lowest wick of the liquidity sweep / Order Block MINUS volatility buffer (`0.20x {execution_tf} ATR` + current spread).
+   - SELL Stop Loss = Highest wick of the liquidity sweep / Order Block PLUS volatility buffer (`0.20x {execution_tf} ATR` + current spread).
+   - Never place stops at arbitrary fixed pip counts or directly on round psychological numbers (`00` / `50` levels).
+2. Minimum Net R:R Thresholds (After Spread Deduction):
+   - `SCALP`: Minimum `>= 1.8R` to opposing internal session liquidity (`TP1` at `1.2R-1.5R`, `TP2` at `>= 2.0R`).
+   - `SWING`: Minimum `>= 2.5R` to HTF Draw on Liquidity (`TP1` at `1.5R-2.0R`, `TP2` at `>= 3.0R`).
+   - If opposing HTF resistance/support blocks price before reaching minimum R:R, reject (`WAIT`).
+3. Dynamic Protection Plan:
+   - Define `breakeven_trigger_price` (price where position moves SL to Entry + Spread, typically upon hitting `+1.0R` or clearing the first opposing swing structure).
+
+================================================================================
+SECTION 4: PRE-TRIGGER RADAR PROTOCOL
+================================================================================
+If Gate 1 & Gate 2 are aligned (clear HTF trend/range + clean liquidity zone ahead), ONLY Gate 3 has not fired yet because price is still approaching the zone:
+- Output `decision: "PRE_TRIGGER"`.
+- Populate `radar_setup` with the exact price zone to monitor, required candlestick trigger condition, invalidation level, and TTL (`expires_in_minutes`: 90-180 for `SCALP`, 720-1440 for `SWING`).
+
+================================================================================
+SECTION 5: STRICT DETERMINISTIC JSON OUTPUT SCHEMA
+================================================================================
+Respond ONLY with raw, valid JSON matching this exact structure (no markdown wrappers, no prose outside JSON):
+{{
+  "decision": "EXECUTE_MARKET" | "PLACE_LIMIT" | "PRE_TRIGGER" | "WAIT",
+  "trade_style": "SCALP" | "SWING",
+  "direction": "BUY" | "SELL" | "NONE",
+  "confidence_score": 0,
+  "market_regime": "TRENDING_EXPANSION" | "MEAN_REVERTING_RANGE" | "LOW_LIQUIDITY_CHOP" | "NEWS_SHOCK",
+  "setup_archetype": "LIQUIDITY_SWEEP_REVERSAL" | "BOS_FVG_CONTINUATION" | "RANGE_EXTREME_FADE" | "NONE",
+  "gate_audit": {{
+    "gate_1_regime_session": "PASS | FAIL - concise reason",
+    "gate_2_mtf_structure": "PASS | FAIL - dealing range position (Premium/Discount) & draw on liquidity",
+    "gate_3_candle_orderflow": "PASS | FAIL - sweep status, body/wick ratio, displacement & volume read",
+    "gate_4_friction_correlation": "PASS | FAIL - spread % of SL & currency exposure check",
+    "gate_5_rr_geometry": "PASS | FAIL - structural invalidation & net R:R verification"
+  }},
+  "entry_price": null,
+  "stop_loss": null,
+  "breakeven_trigger_price": null,
+  "take_profit_1": null,
+  "take_profit_2": null,
+  "net_rr_ratio": null,
+  "blocking_rule_code": null,
+  "mtf_confluence_summary": "Institutional synthesis of HTF bias, liquidity swept, candlestick trigger, and target liquidity pool.",
+  "radar_setup": {{
+    "is_active": false,
+    "trigger_zone_price": null,
+    "invalidation_price": null,
+    "trigger_condition": null,
+    "expires_in_minutes": null
+  }}
+}}
 """
+
+INSTITUTIONAL_SUPERVISOR_SYSTEM_PROMPT = INSTITUTIONAL_5_GATE_SUPERVISOR_PROMPT
+SUPERVISOR_SYSTEM_PROMPT = INSTITUTIONAL_5_GATE_SUPERVISOR_PROMPT
 
 
 def build_supervisor_prompt(context: Dict[str, Any]) -> str:
     """Format institutional supervisory system prompt with live runtime variables."""
-    return INSTITUTIONAL_SUPERVISOR_SYSTEM_PROMPT.format(
-        symbol=context.get("symbol", "GOLD#"),
-        asset_class=context.get("asset_class", "COMMODITIES"),
+    symbol = context.get("symbol", "GOLD#")
+    spec = INSTRUMENT_UNIVERSE.get(symbol) or INSTRUMENT_UNIVERSE.get(f"{symbol}#")
+    digits = context.get("digits", spec.digits if spec else 2)
+    pip_size = context.get("pip_size", spec.tick_size if spec else 0.01)
+
+    utc_ts = context.get("utc_timestamp")
+    if not utc_ts:
+        utc_ts = now_utc().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    return INSTITUTIONAL_5_GATE_SUPERVISOR_PROMPT.format(
+        symbol=symbol,
+        asset_class=context.get("asset_class", spec.asset_class if spec else "COMMODITIES"),
+        digits=digits,
+        pip_size=pip_size,
         trade_style=context.get("trade_style", "SCALP"),
         planning_tf=context.get("planning_tf", "M15"),
         execution_tf=context.get("execution_tf", "M5"),
-        scan_interval_minutes=context.get("scan_interval_minutes", 5),
+        utc_timestamp=utc_ts,
         active_session=context.get("active_session", "LONDON_OPEN"),
         bid=context.get("bid", 0.0),
         ask=context.get("ask", 0.0),
         current_spread_points=context.get("current_spread_points", 0),
         spread_pct_of_sl=context.get("spread_pct_of_sl", 0.0),
+        htf_atr=context.get("htf_atr", 1.25 if digits == 2 else 0.0015),
+        ltf_atr=context.get("ltf_atr", 0.45 if digits == 2 else 0.0005),
+        adr_used_pct=context.get("adr_used_pct", 45.0),
+        upcoming_high_impact_news=context.get("upcoming_high_impact_news", "None (No Tier-1 news in next 60m)"),
         open_positions_summary=context.get("open_positions_summary", "None (Zero Exposure)"),
         active_learned_rules_json=context.get("active_learned_rules_json", "[]"),
-        max_spread_points=context.get("max_spread_points", 80),
     )
-
-
-SUPERVISOR_SYSTEM_PROMPT = INSTITUTIONAL_SUPERVISOR_SYSTEM_PROMPT
-
 
 class GeminiSupervisor:
     """Supervises live pair setups and writes analysis reports."""
@@ -652,19 +841,39 @@ class GeminiSupervisor:
                     ).first()
                     max_sp = pair_bot.max_spread_points if pair_bot else 80
 
+                    spec = INSTRUMENT_UNIVERSE.get(packet.symbol) or INSTRUMENT_UNIVERSE.get(f"{packet.symbol}#")
+                    digits = spec.digits if spec else 2
+                    pip_size = spec.tick_size if spec else 0.01
+
+                    # ATR from packet or defaults
+                    packet_atr = getattr(packet, "atr14", 0.0)
+                    htf_atr = round(packet_atr * 1.5, digits) if packet_atr > 0 else (1.25 if digits == 2 else 0.0015)
+                    ltf_atr = round(packet_atr, digits) if packet_atr > 0 else (0.45 if digits == 2 else 0.0005)
+
                     is_scalp = bool(packet.candidate_signals.get("scalp_signal"))
                     prompt_context = {
                         "symbol": packet.symbol,
                         "asset_class": packet.asset_class,
+                        "digits": digits,
+                        "pip_size": pip_size,
                         "trade_style": "SCALP" if is_scalp else "SWING",
                         "planning_tf": scalp_p_tf if is_scalp else swing_p_tf,
                         "execution_tf": scalp_e_tf if is_scalp else swing_e_tf,
+                        "utc_timestamp": now_utc().strftime("%Y-%m-%d %H:%M:%S UTC"),
                         "scan_interval_minutes": scan_mins,
                         "active_session": packet.session_tag,
                         "bid": packet.bid,
                         "ask": packet.ask,
                         "current_spread_points": packet.spread_points,
                         "spread_pct_of_sl": round(float(packet.spread_points * 0.1), 1),
+                        "htf_atr": htf_atr,
+                        "ltf_atr": ltf_atr,
+                        "adr_used_pct": 45.0,
+                        "upcoming_high_impact_news": (
+                            f"{packet.news_blackout.get('event_title', 'Tier-1 Event')} ({packet.news_blackout.get('blackout_reason', 'Blackout')})"
+                            if packet.news_blackout.get("is_blackout")
+                            else "None (No Tier-1 news in next 60m)"
+                        ),
                         "open_positions_summary": "None (Zero Exposure)",
                         "active_learned_rules_json": json.dumps(active_rules, indent=2),
                         "max_spread_points": max_sp,
@@ -704,14 +913,16 @@ class GeminiSupervisor:
                 analysis_result = self._fallback_deterministic_supervision(packet, active_rules, pattern_memory)
 
             # Determine execution_status
-            if analysis_result.decision.startswith("EXECUTE"):
+            if analysis_result.decision.startswith("EXECUTE") or analysis_result.decision in ("PLACE_LIMIT", "STAGE_PENDING"):
                 execution_status = "PLANNED"
-            elif analysis_result.market_regime == "NEWS_BLACKOUT":
+            elif analysis_result.decision == "PRE_TRIGGER":
+                execution_status = "PRE_TRIGGER"
+            elif analysis_result.market_regime in ("NEWS_BLACKOUT", "NEWS_SHOCK"):
                 execution_status = "NEWS_BLACKOUT"
             else:
                 execution_status = "WAITING"
 
-            # Parse upcoming setup details
+            # Parse upcoming setup details (supporting upcoming_setup and radar_setup)
             upcoming_dict = None
             readiness_val = 0
             bias_val = "NONE"
@@ -719,6 +930,31 @@ class GeminiSupervisor:
                 upcoming_dict = analysis_result.upcoming_setup.model_dump()
                 readiness_val = analysis_result.upcoming_setup.readiness_pct
                 bias_val = analysis_result.upcoming_setup.watch_bias
+            elif analysis_result.radar_setup and (analysis_result.radar_setup.is_active or analysis_result.decision == "PRE_TRIGGER"):
+                rs = analysis_result.radar_setup
+                bias_val = "BULLISH_WATCH" if analysis_result.direction == "BUY" else ("BEARISH_WATCH" if analysis_result.direction == "SELL" else "RANGE_BOUND")
+                readiness_val = 75 if analysis_result.decision == "PRE_TRIGGER" else 50
+                trigger_price_val = rs.trigger_zone_price or (packet.bid if packet.bid > 0 else None)
+                inval_price = rs.invalidation_price
+                upcoming_dict = {
+                    "watch_bias": bias_val,
+                    "setup_mode": analysis_result.trade_style or "SCALP",
+                    "trade_style": analysis_result.trade_style or "SCALP",
+                    "planning_tf": prompt_context.get("planning_tf", "M15"),
+                    "execution_tf": prompt_context.get("execution_tf", "M5"),
+                    "trigger_zone": str(rs.trigger_zone_price or ""),
+                    "trigger_condition": rs.trigger_condition or "",
+                    "planned_entry": trigger_price_val,
+                    "invalidation_price": inval_price,
+                    "invalidation_level": inval_price,
+                    "readiness_pct": readiness_val,
+                    "expires_at": (now_utc() + timedelta(minutes=rs.expires_in_minutes or 60)).isoformat(),
+                    "proximity_pct": 80.0 if analysis_result.decision == "PRE_TRIGGER" else 50.0,
+                    "rr_ratio": analysis_result.net_rr_ratio or 2.0,
+                    "projected_rr": analysis_result.net_rr_ratio or 2.0,
+                    "planned_tp1": analysis_result.take_profit_1 or analysis_result.tp1,
+                    "planned_tp2": analysis_result.take_profit_2 or analysis_result.tp2,
+                }
 
             # Create Report Entity
             report = GeminiAnalysisReport(
@@ -817,18 +1053,28 @@ class GeminiSupervisor:
             active_rules = self.get_active_rules(symbol, db=db)
             spec = INSTRUMENT_UNIVERSE.get(symbol) or INSTRUMENT_UNIVERSE.get(f"{symbol}#")
 
+            digits = spec.digits if spec else (pair.digits if pair else 2)
+            pip_size = spec.tick_size if spec else 0.01
+
             context = {
                 "symbol": symbol,
                 "asset_class": (spec.asset_class if spec else (pair.asset_class if pair else "COMMODITIES")),
+                "digits": digits,
+                "pip_size": pip_size,
                 "trade_style": "SCALP",
                 "planning_tf": getattr(st, "scalp_planning_tf", "M15"),
                 "execution_tf": getattr(st, "scalp_execution_tf", "M5"),
+                "utc_timestamp": now_utc().strftime("%Y-%m-%d %H:%M:%S UTC"),
                 "scan_interval_minutes": max(1, (st.global_scan_interval_sec if st else 300) // 60),
                 "active_session": "LONDON_OPEN",
                 "bid": 2650.50 if "GOLD" in symbol else (91500.0 if "BTC" in symbol else 1.0850),
                 "ask": 2650.70 if "GOLD" in symbol else (91520.0 if "BTC" in symbol else 1.0852),
                 "current_spread_points": pair.max_spread_points if pair else 80,
                 "spread_pct_of_sl": 5.5,
+                "htf_atr": 1.25 if digits == 2 else 0.0015,
+                "ltf_atr": 0.45 if digits == 2 else 0.0005,
+                "adr_used_pct": 45.0,
+                "upcoming_high_impact_news": "None (No Tier-1 news in next 60m)",
                 "open_positions_summary": "None (Zero Exposure)",
                 "active_learned_rules_json": json.dumps(active_rules, indent=2),
                 "max_spread_points": pair.max_spread_points if pair else 80,

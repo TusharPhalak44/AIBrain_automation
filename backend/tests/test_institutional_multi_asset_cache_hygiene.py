@@ -334,16 +334,17 @@ def test_institutional_prompt_builder_and_preview(client):
     }
 
     prompt = build_supervisor_prompt(context)
-    assert "Institutional Quantitative Trading Supervisor" in prompt
-    assert "GOLD# (COMMODITIES)" in prompt
+    assert "Principal Quantitative Price-Action Strategist & Execution Risk Supervisor" in prompt
+    assert "GOLD# (COMMODITIES" in prompt
     assert "NY_OVERLAP" in prompt
-    assert "5-GATE INSTITUTIONAL EVALUATION PROTOCOL" in prompt
-    assert "Regime & Volatility Gate" in prompt
-    assert "Multi-Timeframe Order Flow Gate" in prompt
-    assert "Microstructure & Spread-Friction Gate" in prompt
-    assert "Asymmetric R:R Gate" in prompt
-    assert "Pattern Edge & Learned Vault Gate" in prompt
-    assert "PRE-TRIGGER UPCOMING RADAR GENERATION" in prompt
+    assert "THE INSTITUTIONAL 5-GATE EVALUATION PROTOCOL" in prompt
+    assert "GATE 1: MACRO REGIME, SESSION KILLZONE & ADR EXHAUSTION" in prompt
+    assert "GATE 2: MULTI-TIMEFRAME CHART STRUCTURE & LIQUIDITY MAPPING" in prompt
+    assert "GATE 3: CANDLESTICK ANATOMY, ORDER FLOW & SWEEP CONFIRMATION" in prompt
+    assert "GATE 4: MICROSTRUCTURE FRICTION, CORRELATION & ORDER ROUTING" in prompt
+    assert "GATE 5: ASYMMETRIC GEOMETRY, STOP INVALIDATION & TRADE MANAGEMENT" in prompt
+    assert "SECTION 4: PRE-TRIGGER RADAR PROTOCOL" in prompt
+    assert "SECTION 5: STRICT DETERMINISTIC JSON OUTPUT SCHEMA" in prompt
     assert "TEST_R1" in prompt
 
     # Verify GET /api/ai/prompt-preview
@@ -352,4 +353,4 @@ def test_institutional_prompt_builder_and_preview(client):
     pdata = res.json()
     assert pdata["status"] == "SUCCESS"
     assert "rendered_prompt" in pdata
-    assert "5-GATE INSTITUTIONAL EVALUATION PROTOCOL" in pdata["rendered_prompt"]
+    assert "THE INSTITUTIONAL 5-GATE EVALUATION PROTOCOL" in pdata["rendered_prompt"]
