@@ -280,13 +280,37 @@ class GeminiSupervisor:
             if packet.scalp_bias_m15_h1 == "CHOP":
                 regime = "RANGE_SWEEP"
 
-            # Check rule blocking
+            # Check rule blocking with condition evaluation
             blocked = False
             block_reason = ""
             for r in active_rules:
-                if r["mode"] == "SCALP" and "BLOCK" in str(r.get("action", "")).upper():
-                    blocked = True
-                    block_reason = f"Blocked by rule {r['rule_code']}"
+                if r.get("mode") in ("SCALP", "BOTH"):
+                    cond = r.get("condition") or {}
+                    if isinstance(cond, str):
+                        try:
+                            cond = json.loads(cond)
+                        except Exception:
+                            cond = {}
+                    filt_act = cond.get("filter_action", "")
+                    indicator = cond.get("indicator", "")
+                    # Match direction
+                    if filt_act in (f"BLOCK_{direction}", "BLOCK_ALL"):
+                        if indicator == "news_guard" and packet.news_blackout.get("is_blackout", False):
+                            blocked = True
+                            block_reason = f"Blocked by rule {r['rule_code']}: Tier-1 news blackout"
+                            break
+                        elif indicator == "market_regime" and packet.scalp_bias_m15_h1 == "CHOP":
+                            blocked = True
+                            block_reason = f"Blocked by rule {r['rule_code']}: Low-volatility chop"
+                            break
+                        elif indicator == "ema_trend" and ((direction == "BUY" and packet.swing_bias_h4_d1 == "BEARISH") or (direction == "SELL" and packet.swing_bias_h4_d1 == "BULLISH")):
+                            blocked = True
+                            block_reason = f"Blocked by rule {r['rule_code']}: Higher-timeframe counter-trend"
+                            break
+                        elif filt_act == "BLOCK_ALL":
+                            blocked = True
+                            block_reason = f"Blocked by rule {r['rule_code']}"
+                            break
 
             if blocked:
                 return GeminiSupervisoryOutput(

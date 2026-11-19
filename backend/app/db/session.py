@@ -218,10 +218,10 @@ def init_db(bind_engine=None) -> None:
         except Exception as pe:
             logger.debug(f"Pair purge cleanup note: {pe}")
 
-        # Seed STRICT 2-Pair XM Global Focus: Gold & Bitcoin ONLY
+        # Seed STRICT 2-Pair XM Global Focus: Gold & Bitcoin ONLY with realistic XM spread caps
         default_pairs = [
-            ("GOLD#", "METAL", 35, 100.0, 0.01, 1.0, 2),
-            ("BTCUSD#", "CRYPTO", 45, 1.0, 0.01, 0.01, 2),
+            ("GOLD#", "METAL", 80, 100.0, 0.01, 1.0, 2),
+            ("BTCUSD#", "CRYPTO", 6000, 1.0, 0.01, 0.01, 2),
         ]
         for sym, aclass, max_spread, csize, tsize, tval, dig in default_pairs:
             pair = session.query(TradingPairBot).filter_by(symbol=sym).first()
@@ -238,17 +238,23 @@ def init_db(bind_engine=None) -> None:
                         tick_size=tsize,
                         tick_value=tval,
                         digits=dig,
+                        scalp_strategy_id=1 if "GOLD" in sym else 4,
+                        swing_strategy_id=3,
                     )
                 )
             else:
                 pair.enabled = True
                 pair.scalp_enabled = True
                 pair.swing_enabled = True
+                if not pair.max_spread_points or ("BTC" in sym and pair.max_spread_points < 1000) or ("GOLD" in sym and pair.max_spread_points < 70):
+                    pair.max_spread_points = max_spread
 
-        # Unbind static script FKs so live scanning relies 100% on pure price-action pattern detection + Gemini supervisory intelligence
+        # Ensure active pairs have default built-in strategies attached if none assigned
         for pb in session.query(TradingPairBot).all():
-            pb.scalp_strategy_id = None
-            pb.swing_strategy_id = None
+            if not pb.scalp_strategy_id:
+                pb.scalp_strategy_id = 1 if "GOLD" in pb.symbol else 4
+            if not pb.swing_strategy_id:
+                pb.swing_strategy_id = 3
         session.commit()
 
         # Seed default PairPatternMemory scorecard records if empty

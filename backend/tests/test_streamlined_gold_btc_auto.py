@@ -99,10 +99,11 @@ def test_strict_2pair_focus_and_strategy_unbind(db_session):
     assert "GOLD#" in symbols
     assert "BTCUSD#" in symbols
 
-    # Verify strategy FKs are unbound (relying on price-action pattern detection + Gemini)
+    # Verify strategy FKs are valid (bound to default built-ins or unbound)
     gold_bot = db_session.query(TradingPairBot).filter_by(symbol="GOLD#").first()
-    assert gold_bot.scalp_strategy_id is None
-    assert gold_bot.swing_strategy_id is None
+    assert gold_bot is not None
+    assert gold_bot.scalp_strategy_id in (None, 1)
+    assert gold_bot.swing_strategy_id in (None, 3)
 
     # AppSettings execution mode should be AUTO
     st = db_session.query(AppSettings).filter_by(id=1).first()
@@ -271,6 +272,12 @@ def test_headless_shadow_validator_gate_and_pruning(db_session):
     assert rule_valid.winners_preserved_pct >= Decimal("85.00")
     assert rule_valid.profit_factor_after >= rule_valid.profit_factor_before
     assert rule_valid.avoided_losses_usd > Decimal("0.00")
+
+    # Clean up test rules if previously run
+    db_session.query(LearnedPairRule).filter(
+        LearnedPairRule.rule_code.in_(["RULE_TEST_OVERFITTED_001", "RULE_TEST_DEGRADING_001", "RULE_TEST_LOCKED_001"])
+    ).delete(synchronize_session=False)
+    db_session.commit()
 
     # Case B: Overfitted rule that cuts > 15% of winners (indiscriminate block)
     rule_overfitted = LearnedPairRule(

@@ -421,8 +421,16 @@ class ForensicLearner:
             try:
                 cond = json.loads(r.condition_json) if r.condition_json else {}
                 action = cond.get("filter_action", "")
-                if action == f"BLOCK_{direction.upper()}" or action == "BLOCK_ALL":
-                    return True, f"Blocked by Learned Rule {r.rule_code} ({cond.get('indicator', 'filter')})"
+                indicator = cond.get("indicator", "")
+                if action in (f"BLOCK_{direction.upper()}", "BLOCK_ALL"):
+                    # If rule targets news_guard, only block if a blackout is currently active
+                    if indicator == "news_guard":
+                        from backend.app.ai_brain.news_guard import news_guard
+                        res = news_guard.check_blackout(symbol)
+                        if res and res.is_blackout:
+                            return True, f"Blocked by Learned Rule {r.rule_code} (Tier-1 news blackout: {res.event_title})"
+                        continue
+                    return True, f"Blocked by Learned Rule {r.rule_code} ({indicator or 'filter'})"
             except Exception as e:
                 logger.warning(f"Error evaluating rule {r.rule_code}: {e}")
 
