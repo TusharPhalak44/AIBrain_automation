@@ -3,16 +3,16 @@
 import urllib.parse
 from sqlalchemy.orm import Session
 from backend.app.db.models import TradingPairBot
+from backend.app.ai_brain.instruments import INSTRUMENT_UNIVERSE
 
-# Strict 2-Pair Focus: Gold & Bitcoin ONLY
-XM_ACTIVE_SYMBOLS = ["GOLD#", "BTCUSD#"]
+XM_ACTIVE_SYMBOLS = list(INSTRUMENT_UNIVERSE.keys())
 
 
 def resolve_broker_symbol(symbol: str, db: Session) -> str:
     """
     Safely resolve client symbols to canonical XM MT5 broker symbols.
     Handles URL decoding (e.g. 'GOLD%23' -> 'GOLD#') and unencoded '#' fragment loss
-    (e.g. 'GOLD' -> 'GOLD#') by checking registered TradingPairBot rows.
+    (e.g. 'GOLD' -> 'GOLD#') by checking registered TradingPairBot rows and INSTRUMENT_UNIVERSE aliases.
     """
     if not symbol:
         return "GOLD#"
@@ -37,12 +37,10 @@ def resolve_broker_symbol(symbol: str, db: Session) -> str:
     if pair_stripped:
         return pair_stripped.symbol
 
-    # 4. Standard XM Ultra Low 2-Pair default (Gold & Bitcoin only)
-    clean_base = unquoted.rstrip("#")
-    if clean_base in ("GOLD", "XAUUSD"):
-        return "GOLD#"
-    if clean_base in ("BTCUSD", "BTC"):
-        return "BTCUSD#"
+    # 4. Check INSTRUMENT_UNIVERSE aliases
+    for canon_sym, spec in INSTRUMENT_UNIVERSE.items():
+        if unquoted in spec.aliases or stripped in spec.aliases or with_hash in spec.aliases:
+            return canon_sym
 
-    return f"{clean_base}#" if not unquoted.endswith("#") else unquoted
+    return f"{stripped}#" if not unquoted.endswith("#") else unquoted
 

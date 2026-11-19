@@ -75,6 +75,20 @@ class AppSettings(Base):
     # Gemini Usage & Free Tier Switch
     gemini_use_free_tier: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
+    # Scanner Timeframe Matrix
+    scalp_planning_tf: Mapped[str] = mapped_column(String(16), default="M15", nullable=False)
+    scalp_execution_tf: Mapped[str] = mapped_column(String(16), default="M5", nullable=False)
+    swing_planning_tf: Mapped[str] = mapped_column(String(16), default="H4", nullable=False)
+    swing_execution_tf: Mapped[str] = mapped_column(String(16), default="H1", nullable=False)
+
+    # Automated Daily Cache Hygiene
+    cache_auto_daily_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    cache_daily_purge_hour_utc: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    cache_daily_purge_minute_utc: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
+    cache_last_cleared_at_utc: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     # Remote MySQL Hosting & Backup Hub
     remote_db_host: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     remote_db_port: Mapped[Optional[int]] = mapped_column(Integer, default=3306, nullable=True)

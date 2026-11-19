@@ -199,6 +199,35 @@ export const api = {
       return request<any[]>(`/api/ai/pattern-memory${q}`);
     },
     getPendingLimits: () => request<any[]>("/api/ai/pending-limits"),
+    getCacheStatus: () => request<any>("/api/ai/cache/status"),
+    clearCache: (forceAll: boolean = false) =>
+      request<any>(`/api/ai/cache/clear${forceAll ? "?force_all=true" : ""}`, {
+        method: "POST",
+      }),
+    updateCacheConfig: (payload: { auto_daily_enabled?: boolean; daily_purge_hour_utc?: number }) =>
+      request<any>("/api/ai/cache/config", {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+      }),
+    getScannerConfig: () => request<any>("/api/ai/scanner/config"),
+    updateScannerConfig: (payload: {
+      global_scan_interval_sec?: number;
+      scalp_planning_tf?: string;
+      scalp_execution_tf?: string;
+      swing_planning_tf?: string;
+      swing_execution_tf?: string;
+      pair_enabled_map?: Record<string, boolean>;
+    }) =>
+      request<any>("/api/ai/scanner/config", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      }),
+    getPromptPreview: (symbol: string = "GOLD#") =>
+      request<any>(`/api/ai/prompt-preview?symbol=${encodeURIComponent(symbol)}`),
+    togglePair: (symbol: string) =>
+      request<any>(`/api/ai/pairs/${encodeURIComponent(symbol)}/toggle`, {
+        method: "POST",
+      }),
   },
 
   strategies: {

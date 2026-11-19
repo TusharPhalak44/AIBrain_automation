@@ -44,11 +44,13 @@ export interface PendingOrder {
 }
 
 export interface PairSchedule {
+  symbol?: string;
   interval_sec: number;
   last_scan_ist?: string;
   last_decision?: string;
   status: string;
   next_scan_seconds?: number;
+  seconds_remaining?: number;
 }
 
 export interface QuoteData {

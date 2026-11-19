@@ -109,6 +109,7 @@ def create_app(enable_lifespan_tasks: bool = True) -> FastAPI:
     app.include_router(telegram.router, prefix="/api")
     app.include_router(strategies.router, prefix="/api")
     app.include_router(ai_brain.router, prefix="/api")
+    app.include_router(ai_brain.brain_router, prefix="/api")
     app.include_router(candles.router, prefix="/api")
     app.include_router(usage_analytics.router, prefix="/api")
     app.include_router(db_admin.router, prefix="/api")

@@ -33,6 +33,8 @@ from backend.app.telegram_reports.telegram_bot import telegram_service
 from backend.app.api.websocket import manager
 from backend.app.ai_brain.market_packet import market_packet_compiler, MarketPacket
 from backend.app.ai_brain.gemini_supervisor import gemini_supervisor
+from backend.app.ai_brain.instruments import is_symbol_trading_open
+from backend.app.ai_brain.cache_manager import cache_manager
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +150,20 @@ class LiveIntervalScheduler:
 
                     if exec_mode == "AUTO":
                         await self._monitor_pending_limit_orders(db, active_acc)
+
+                    # Automated Daily Cache Hygiene Check
+                    if getattr(st, "cache_auto_daily_enabled", True):
+                        purge_hr = getattr(st, "cache_daily_purge_hour_utc", 0)
+                        purge_min = getattr(st, "cache_daily_purge_minute_utc", 5)
+                        last_cl = getattr(st, "cache_last_cleared_at_utc", None)
+                        if last_cl is not None and last_cl.tzinfo is None:
+                            last_cl = last_cl.replace(tzinfo=timezone.utc)
+                        should_purge = False
+                        if now.hour == purge_hr and now.minute >= purge_min:
+                            if last_cl is None or (now - last_cl).total_seconds() > 72000:
+                                should_purge = True
+                        if should_purge:
+                            cache_manager.purge_stale_entries(reason="SCHEDULED_DAILY_PURGE", db=db)
 
                 if exec_mode == "HALTED":
                     for sched in self.pair_schedules.values():
@@ -298,6 +314,15 @@ class LiveIntervalScheduler:
 
             if not pair:
                 logger.warning(f"Scan aborted: Pair '{symbol}' not found in database.")
+                return None
+
+            # Weekend Check: Skip FOREX and COMMODITIES when markets are closed, keep CRYPTO 24/7
+            if not is_symbol_trading_open(symbol, pair.asset_class, now):
+                if symbol in self.pair_schedules:
+                    self.pair_schedules[symbol]["last_scan_ist"] = to_ist_str(now)
+                    self.pair_schedules[symbol]["last_decision"] = "WEEKEND_CLOSED"
+                    self.pair_schedules[symbol]["status"] = "WEEKEND_CLOSED"
+                logger.debug(f"Skipping scan for {symbol} ({pair.asset_class}): Market closed for weekend.")
                 return None
 
             # 1. Compile MarketPacket

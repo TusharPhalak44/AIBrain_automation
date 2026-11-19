@@ -1,6 +1,6 @@
 """REST Routes for Gemini Supervisory Brain, Live Scheduler & Macro News."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 import json
 import logging
@@ -24,6 +24,9 @@ from backend.app.db.models import (
 from backend.app.ai_brain.scheduler import scheduler
 from backend.app.ai_brain.news_guard import news_guard
 from backend.app.ai_brain.forensic_learner import forensic_learner
+from backend.app.ai_brain.cache_manager import cache_manager
+from backend.app.ai_brain.gemini_supervisor import gemini_supervisor, INSTITUTIONAL_SUPERVISOR_SYSTEM_PROMPT
+from backend.app.ai_brain.instruments import INSTRUMENT_UNIVERSE
 from backend.app.mt5_bridge.connector import mt5_connector
 
 logger = logging.getLogger(__name__)
@@ -95,12 +98,12 @@ async def get_upcoming_setups(db: Session = Depends(get_db)):
     """
     Return active upcoming setups across all pairs with live tick distance calculations.
     Splits into:
-    1. actionable_setups: STAGE_PENDING / PLANNED Copilot trades ready for 1-click execution.
-    2. watchlist_radar: Developing pre-trigger setups with live distance points ticking towards entry.
+    1. actionable_setups: STAGE_PENDING / PLANNED trades ready for autonomous execution.
+    2. watchlist_radar: Developing pre-trigger setups categorized into Scalp vs Swing.
     """
     st = db.query(AppSettings).filter_by(id=1).first()
     active_type = st.active_account_type if st else "DEMO"
-    exec_mode = st.execution_mode if st else "COPILOT"
+    exec_mode = st.execution_mode if st else "AUTO"
 
     # 1. Actionable Setups (PLANNED in TradeLedger)
     planned_trades = (
@@ -141,19 +144,24 @@ async def get_upcoming_setups(db: Session = Depends(get_db)):
             "id": t.id,
             "trade_id": t.id,
             "symbol": t.symbol,
+            "asset_class": getattr(pair_bot, "asset_class", "COMMODITIES") if pair_bot else "COMMODITIES",
             "direction": t.direction,
             "mode": t.mode,
+            "trade_style": t.mode,
             "lots": float(t.lots),
             "entry_price": float(t.entry_price),
             "sl": float(t.sl),
             "tp1": float(t.tp1),
             "tp2": float(t.tp2),
             "rr_ratio": rr,
+            "projected_rr": rr,
             "current_price": cur_price,
             "distance_points": dist_pts,
+            "distance_pips_or_pct": round(abs(cur_price - float(t.entry_price)), digits),
             "in_trigger_zone": in_zone,
             "status": "READY_TO_EXECUTE" if in_zone else ("APPROACHING" if abs(dist_pts) <= 25 else "DEVELOPING"),
             "readiness_pct": 95 if in_zone else 80,
+            "proximity_pct": 95 if in_zone else max(10, 90 - abs(dist_pts)),
             "thesis": t.ai_analysis_summary,
             "staged_at_ist": to_ist_str(t.opened_at_utc),
         })
@@ -186,20 +194,29 @@ async def get_upcoming_setups(db: Session = Depends(get_db)):
             tp2_p = float(latest_rep.tp2 or 0.0)
             if entry_p > 0 and sl_p > 0:
                 is_buy = entry_p > sl_p
+                style = latest_rep.recommended_mode if latest_rep.recommended_mode in ("SCALP", "SWING") else "SCALP"
                 upcoming_data = {
                     "watch_bias": "BULLISH_WATCH" if is_buy else "BEARISH_WATCH",
-                    "setup_mode": latest_rep.recommended_mode if latest_rep.recommended_mode != "NONE" else "SCALP",
-                    "trigger_zone_low": round(entry_p - (float(p.max_spread_points) * 0.01), p.digits),
-                    "trigger_zone_high": round(entry_p + (float(p.max_spread_points) * 0.01), p.digits),
+                    "setup_mode": style,
+                    "trade_style": style,
+                    "asset_class": p.asset_class,
+                    "planning_tf": "M15" if style == "SCALP" else "H4",
+                    "execution_tf": "M5" if style == "SCALP" else "H1",
+                    "trigger_zone_low": round(entry_p - (float(p.max_spread_points) * (10 ** -p.digits)), p.digits),
+                    "trigger_zone_high": round(entry_p + (float(p.max_spread_points) * (10 ** -p.digits)), p.digits),
+                    "trigger_price": entry_p,
                     "planned_entry": entry_p,
                     "planned_sl": sl_p,
                     "planned_tp1": tp1_p,
                     "planned_tp2": tp2_p,
                     "rr_ratio": round(abs(tp2_p - entry_p) / max(0.0001, abs(entry_p - sl_p)), 2),
+                    "projected_rr": round(abs(tp2_p - entry_p) / max(0.0001, abs(entry_p - sl_p)), 2),
                     "readiness_pct": 70,
                     "trigger_condition": f"Supervisory {latest_rep.decision} confirmation",
                     "invalidation_level": sl_p,
+                    "invalidation_price": sl_p,
                     "expected_window": "Next 1-3 hours",
+                    "expires_at": (now_utc() + timedelta(hours=2 if style == "SCALP" else 24)).isoformat(),
                 }
 
         if upcoming_data and upcoming_data.get("planned_entry"):
@@ -207,6 +224,12 @@ async def get_upcoming_setups(db: Session = Depends(get_db)):
             bias = upcoming_data.get("watch_bias", "NONE")
             z_low = float(upcoming_data.get("trigger_zone_low") or (p_entry * 0.999))
             z_high = float(upcoming_data.get("trigger_zone_high") or (p_entry * 1.001))
+            t_price = float(upcoming_data.get("trigger_price") or p_entry)
+            style = upcoming_data.get("trade_style") or upcoming_data.get("setup_mode") or "SCALP"
+            p_tf = upcoming_data.get("planning_tf") or ("M15" if style == "SCALP" else "H4")
+            e_tf = upcoming_data.get("execution_tf") or ("M5" if style == "SCALP" else "H1")
+            inv_p = float(upcoming_data.get("invalidation_price") or upcoming_data.get("invalidation_level") or (upcoming_data.get("planned_sl") or 0.0))
+            exp_at = upcoming_data.get("expires_at") or (now_utc() + timedelta(hours=2 if style == "SCALP" else 24)).isoformat()
 
             cur_price = p_entry
             dist_pts = 0
@@ -226,25 +249,41 @@ async def get_upcoming_setups(db: Session = Depends(get_db)):
             in_zone = z_low <= cur_price <= z_high
             status_tag = "TRIGGER_READY" if (in_zone or abs(dist_pts) <= 5) else ("APPROACHING" if abs(dist_pts) <= 25 else "DEVELOPING")
 
+            # Calculate proximity percentage 0-100%
+            sl_p = float(upcoming_data.get("planned_sl") or 0.0)
+            spread_impact = round((float(p.max_spread_points) * (10 ** -p.digits) / max(0.0001, abs(p_entry - sl_p))) * 100, 1) if sl_p > 0 else 5.0
+
+            proximity = int(max(0, min(100, 100 - (abs(dist_pts) * 2)))) if in_zone else max(10, min(95, 100 - abs(dist_pts)))
+
             watchlist.append({
                 "symbol": p.symbol,
                 "asset_class": p.asset_class,
+                "trade_style": style.upper(),
+                "setup_mode": style.upper(),
+                "planning_tf": p_tf,
+                "execution_tf": e_tf,
+                "trigger_price": t_price,
+                "distance_pips_or_pct": round(abs(cur_price - p_entry), p.digits),
+                "invalidation_price": inv_p,
+                "projected_rr": float(upcoming_data.get("projected_rr") or upcoming_data.get("rr_ratio") or 2.5),
+                "expires_at": exp_at,
+                "proximity_pct": proximity,
+                "spread_impact_pct": spread_impact,
                 "report_id": latest_rep.id,
                 "market_regime": latest_rep.market_regime,
                 "decision": latest_rep.decision,
                 "confidence": float(latest_rep.confidence),
                 "watch_bias": bias,
-                "setup_mode": upcoming_data.get("setup_mode", "SCALP"),
                 "trigger_zone_low": z_low,
                 "trigger_zone_high": z_high,
                 "planned_entry": p_entry,
-                "planned_sl": float(upcoming_data.get("planned_sl") or 0.0),
+                "planned_sl": sl_p,
                 "planned_tp1": float(upcoming_data.get("planned_tp1") or 0.0),
                 "planned_tp2": float(upcoming_data.get("planned_tp2") or 0.0),
                 "rr_ratio": float(upcoming_data.get("rr_ratio") or 2.5),
                 "readiness_pct": int(upcoming_data.get("readiness_pct") or 65),
                 "trigger_condition": upcoming_data.get("trigger_condition", ""),
-                "invalidation_level": float(upcoming_data.get("invalidation_level") or 0.0),
+                "invalidation_level": inv_p,
                 "expected_window": upcoming_data.get("expected_window", ""),
                 "current_price": cur_price,
                 "distance_points": dist_pts,
@@ -254,14 +293,21 @@ async def get_upcoming_setups(db: Session = Depends(get_db)):
                 "scanned_at_ist": to_ist_str(latest_rep.scanned_at_utc),
             })
 
+    scalp_setups = [item for item in watchlist if item.get("trade_style") == "SCALP"]
+    swing_setups = [item for item in watchlist if item.get("trade_style") == "SWING"]
+
     return {
         "status": "SUCCESS",
         "account_type": active_type,
         "execution_mode": exec_mode,
         "actionable_setups": actionable,
         "watchlist_radar": watchlist,
+        "scalp_setups": scalp_setups,
+        "swing_setups": swing_setups,
         "total_actionable": len(actionable),
         "total_watchlist": len(watchlist),
+        "total_scalp": len(scalp_setups),
+        "total_swing": len(swing_setups),
     }
 
 
@@ -667,5 +713,175 @@ async def get_pending_limits(db: Session = Depends(get_db)):
             })
 
     return combined
+
+
+# ============================================================================
+# TASK 2: Daily Automated Cache Hygiene Engine Endpoints
+# ============================================================================
+
+class CacheConfigSchema(BaseModel):
+    auto_daily_enabled: Optional[bool] = None
+    daily_purge_hour_utc: Optional[int] = Field(None, ge=0, le=23)
+
+
+@router.get("/cache/status")
+def get_cache_status(db: Session = Depends(get_db)):
+    """Return cache hygiene metrics, counts, last cleared, and next scheduled purge."""
+    return cache_manager.get_status(db=db)
+
+
+@router.post("/cache/clear")
+def clear_cache_now(force_all: bool = False, db: Session = Depends(get_db)):
+    """Trigger immediate manual cache purge for memory DFs, expired radar items, and payload buffers."""
+    summary = cache_manager.purge_stale_entries(force_all=force_all, reason="USER_MANUAL_PURGE", db=db)
+    status = cache_manager.get_status(db=db)
+    return {
+        "status": "SUCCESS",
+        "message": f"Cache cleared: {summary['items_cleared']} items purged, ~{summary['estimated_bytes_freed']} bytes freed.",
+        "summary": summary,
+        "current_status": status,
+    }
+
+
+@router.patch("/cache/config")
+def update_cache_config(payload: CacheConfigSchema, db: Session = Depends(get_db)):
+    """Update auto-daily cache purge settings."""
+    updated = cache_manager.configure(
+        auto_daily_enabled=payload.auto_daily_enabled,
+        daily_purge_hour_utc=payload.daily_purge_hour_utc,
+        db=db,
+    )
+    return {"status": "SUCCESS", "config": updated}
+
+
+# Alias router for /api/ai-brain/*
+brain_router = APIRouter(prefix="/ai-brain", tags=["Gemini Supervisory Brain (/ai-brain alias)"])
+
+@brain_router.get("/cache/status")
+def get_cache_status_alias(db: Session = Depends(get_db)):
+    return get_cache_status(db=db)
+
+@brain_router.post("/cache/clear")
+def clear_cache_now_alias(force_all: bool = False, db: Session = Depends(get_db)):
+    return clear_cache_now(force_all=force_all, db=db)
+
+@brain_router.patch("/cache/config")
+def update_cache_config_alias(payload: CacheConfigSchema, db: Session = Depends(get_db)):
+    return update_cache_config(payload=payload, db=db)
+
+
+# ============================================================================
+# TASK 4: Dynamic AI Scanning Interval & Timeframe Planning Controls
+# ============================================================================
+
+class ScannerConfigSchema(BaseModel):
+    global_scan_interval_sec: Optional[int] = Field(None, ge=5, le=3600)
+    scalp_planning_tf: Optional[str] = None
+    scalp_execution_tf: Optional[str] = None
+    swing_planning_tf: Optional[str] = None
+    swing_execution_tf: Optional[str] = None
+    pair_enabled_map: Optional[Dict[str, bool]] = None
+
+
+@router.get("/scanner/config")
+def get_scanner_config(db: Session = Depends(get_db)):
+    """Get active dynamic scanning intervals, timeframe matrix, and active pairs."""
+    st = db.query(AppSettings).filter_by(id=1).first()
+    pairs = db.query(TradingPairBot).all()
+    return {
+        "global_scan_interval_sec": st.global_scan_interval_sec if st else 300,
+        "scalp_planning_tf": getattr(st, "scalp_planning_tf", "M15"),
+        "scalp_execution_tf": getattr(st, "scalp_execution_tf", "M5"),
+        "swing_planning_tf": getattr(st, "swing_planning_tf", "H4"),
+        "swing_execution_tf": getattr(st, "swing_execution_tf", "H1"),
+        "pairs": [
+            {
+                "symbol": p.symbol,
+                "asset_class": p.asset_class,
+                "enabled": p.enabled,
+                "scalp_enabled": p.scalp_enabled,
+                "swing_enabled": p.swing_enabled,
+                "scan_interval_sec": p.scan_interval_sec,
+                "max_spread_points": p.max_spread_points,
+            }
+            for p in pairs
+        ],
+    }
+
+
+@router.post("/scanner/config")
+@router.patch("/scanner/config")
+def update_scanner_config(payload: ScannerConfigSchema, db: Session = Depends(get_db)):
+    """Hot-reload scanner intervals, timeframe matrix, and pair toggles without restart."""
+    st = db.query(AppSettings).filter_by(id=1).first()
+    if st:
+        if payload.global_scan_interval_sec is not None:
+            st.global_scan_interval_sec = payload.global_scan_interval_sec
+        if payload.scalp_planning_tf is not None:
+            st.scalp_planning_tf = payload.scalp_planning_tf
+        if payload.scalp_execution_tf is not None:
+            st.scalp_execution_tf = payload.scalp_execution_tf
+        if payload.swing_planning_tf is not None:
+            st.swing_planning_tf = payload.swing_planning_tf
+        if payload.swing_execution_tf is not None:
+            st.swing_execution_tf = payload.swing_execution_tf
+
+    if payload.pair_enabled_map:
+        for sym, is_en in payload.pair_enabled_map.items():
+            pb = db.query(TradingPairBot).filter(
+                (TradingPairBot.symbol == sym) | (TradingPairBot.symbol == f"{sym}#")
+            ).first()
+            if pb:
+                pb.enabled = is_en
+
+    db.commit()
+
+    # Trigger hot-reload in scheduler
+    try:
+        scheduler._sync_pair_schedules(db)
+    except Exception as e:
+        logger.debug(f"Scheduler hot-reload note: {e}")
+
+    return {"status": "SUCCESS", "message": "Scanner and timeframe configuration updated successfully."}
+
+
+@router.get("/prompt-preview")
+def get_prompt_preview(symbol: str = "GOLD#", db: Session = Depends(get_db)):
+    """Render the exact institutional supervisor prompt for UI preview."""
+    resolved = resolve_broker_symbol(symbol, db)
+    rendered = gemini_supervisor.get_rendered_supervisor_prompt(resolved, db=db)
+    return {
+        "status": "SUCCESS",
+        "symbol": resolved,
+        "prompt_template": INSTITUTIONAL_SUPERVISOR_SYSTEM_PROMPT,
+        "rendered_prompt": rendered,
+    }
+
+
+@router.post("/pairs/{symbol}/toggle")
+def toggle_pair_enabled(symbol: str, db: Session = Depends(get_db)):
+    """Toggle scanner enablement for a specific pair."""
+    resolved = resolve_broker_symbol(symbol, db)
+    pb = db.query(TradingPairBot).filter(
+        (TradingPairBot.symbol == resolved) | (TradingPairBot.symbol == f"{resolved}#")
+    ).first()
+    if not pb:
+        raise HTTPException(status_code=404, detail=f"Pair '{resolved}' not found.")
+    pb.enabled = not pb.enabled
+    db.commit()
+
+    # Hot reload
+    try:
+        scheduler._sync_pair_schedules(db)
+    except Exception:
+        pass
+
+    return {
+        "status": "SUCCESS",
+        "symbol": pb.symbol,
+        "enabled": pb.enabled,
+        "message": f"Pair {pb.symbol} scanner is now {'ENABLED' if pb.enabled else 'DISABLED'}.",
+    }
+
 
 

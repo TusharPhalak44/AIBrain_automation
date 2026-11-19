@@ -98,6 +98,14 @@ def init_db(bind_engine=None) -> None:
                 ("remote_db_pass_enc", "TEXT NULL"),
                 ("remote_db_name", "VARCHAR(128) NULL"),
                 ("active_db_target", "VARCHAR(16) DEFAULT 'LOCAL_XAMPP'"),
+                ("scalp_planning_tf", "VARCHAR(16) DEFAULT 'M15'"),
+                ("scalp_execution_tf", "VARCHAR(16) DEFAULT 'M5'"),
+                ("swing_planning_tf", "VARCHAR(16) DEFAULT 'H4'"),
+                ("swing_execution_tf", "VARCHAR(16) DEFAULT 'H1'"),
+                ("cache_auto_daily_enabled", "BOOLEAN DEFAULT TRUE"),
+                ("cache_daily_purge_hour_utc", "INT DEFAULT 0"),
+                ("cache_daily_purge_minute_utc", "INT DEFAULT 5"),
+                ("cache_last_cleared_at_utc", "DATETIME NULL"),
             ]:
                 try:
                     conn.execute(text(f"ALTER TABLE app_settings ADD COLUMN {col} {col_type};"))
@@ -209,45 +217,44 @@ def init_db(bind_engine=None) -> None:
                 )
             )
 
-        # Purge non-Gold and non-BTC pairs from TradingPairBot table
-        try:
-            session.query(TradingPairBot).filter(
-                ~TradingPairBot.symbol.in_(["GOLD#", "BTCUSD#", "GOLD", "BTCUSD", "XAUUSD"])
-            ).delete(synchronize_session=False)
-            session.commit()
-        except Exception as pe:
-            logger.debug(f"Pair purge cleanup note: {pe}")
+        # Seed Multi-Asset High-Liquidity Instrument Universe (Forex, Commodities, Crypto)
+        from backend.app.ai_brain.instruments import INSTRUMENT_UNIVERSE
 
-        # Seed STRICT 2-Pair XM Global Focus: Gold & Bitcoin ONLY with realistic XM spread caps
-        default_pairs = [
-            ("GOLD#", "METAL", 80, 100.0, 0.01, 1.0, 2),
-            ("BTCUSD#", "CRYPTO", 6000, 1.0, 0.01, 0.01, 2),
-        ]
-        for sym, aclass, max_spread, csize, tsize, tval, dig in default_pairs:
+        for sym, spec in INSTRUMENT_UNIVERSE.items():
             pair = session.query(TradingPairBot).filter_by(symbol=sym).first()
             if not pair:
                 session.add(
                     TradingPairBot(
                         symbol=sym,
-                        asset_class=aclass,
+                        asset_class=spec.asset_class,
                         enabled=True,
                         scalp_enabled=True,
                         swing_enabled=True,
-                        max_spread_points=max_spread,
-                        contract_size=csize,
-                        tick_size=tsize,
-                        tick_value=tval,
-                        digits=dig,
-                        scalp_strategy_id=1 if "GOLD" in sym else 4,
-                        swing_strategy_id=3,
+                        max_spread_points=spec.max_spread_points,
+                        contract_size=Decimal(str(spec.contract_size)),
+                        tick_size=Decimal(str(spec.tick_size)),
+                        tick_value=Decimal(str(spec.tick_value)),
+                        digits=spec.digits,
+                        scalp_strategy_id=spec.scalp_strategy_id,
+                        swing_strategy_id=spec.swing_strategy_id,
                     )
                 )
             else:
-                pair.enabled = True
-                pair.scalp_enabled = True
-                pair.swing_enabled = True
-                if not pair.max_spread_points or ("BTC" in sym and pair.max_spread_points < 1000) or ("GOLD" in sym and pair.max_spread_points < 70):
-                    pair.max_spread_points = max_spread
+                # Update attributes to match spec if uncalibrated
+                pair.asset_class = spec.asset_class
+                if pair.contract_size is None or float(pair.contract_size) == 0.0:
+                    pair.contract_size = Decimal(str(spec.contract_size))
+                if pair.tick_size is None or float(pair.tick_size) == 0.0:
+                    pair.tick_size = Decimal(str(spec.tick_size))
+                if pair.tick_value is None or float(pair.tick_value) == 0.0:
+                    pair.tick_value = Decimal(str(spec.tick_value))
+                pair.digits = spec.digits
+                if not pair.max_spread_points or pair.max_spread_points < 10:
+                    pair.max_spread_points = spec.max_spread_points
+                if not pair.scalp_strategy_id:
+                    pair.scalp_strategy_id = spec.scalp_strategy_id
+                if not pair.swing_strategy_id:
+                    pair.swing_strategy_id = spec.swing_strategy_id
 
         # Ensure active pairs have default built-in strategies attached if none assigned
         for pb in session.query(TradingPairBot).all():

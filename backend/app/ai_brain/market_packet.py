@@ -36,14 +36,17 @@ from backend.app.strategy_lab.indicators import (
 )
 from backend.app.strategy_lab.sandbox import StrategySandbox
 from backend.app.ai_brain.news_guard import news_guard, NewsBlackoutResult
+from backend.app.ai_brain.instruments import (
+    INSTRUMENT_UNIVERSE,
+    resolve_marketwatch_symbol,
+    is_symbol_trading_open,
+)
+from backend.app.ai_brain.cache_manager import cache_manager
 
 logger = logging.getLogger(__name__)
 
-# Strict 2-Pair Focus: Gold & Bitcoin ONLY
-XM_ACTIVE_SYMBOLS = [
-    "GOLD#",
-    "BTCUSD#",
-]
+# Multi-Asset High-Liquidity Universe (Forex, Commodities, Crypto)
+XM_ACTIVE_SYMBOLS = list(INSTRUMENT_UNIVERSE.keys())
 
 TIMEFRAME_MAP = {
     "M1": 1,
@@ -109,6 +112,11 @@ class MarketPacketCompiler:
         count: int = 150,
     ) -> Optional[pd.DataFrame]:
         """Pull live historical bars from connected MT5 terminal with symbol suffix fallback."""
+        cache_key = f"{symbol}_{timeframe}_{count}"
+        cached_df = cache_manager.get_df(cache_key, max_age_seconds=15)
+        if cached_df is not None:
+            return cached_df
+
         if not mt5_connector.is_connected:
             return None
 
@@ -116,8 +124,9 @@ class MarketPacketCompiler:
             import MetaTrader5 as mt5
 
             tf_val = TIMEFRAME_MAP.get(timeframe.upper(), mt5.TIMEFRAME_H1)
+            resolved_sym = resolve_marketwatch_symbol(symbol)
             clean_sym = symbol.rstrip("#")
-            candidates = [symbol, clean_sym, f"{clean_sym}#"]
+            candidates = [resolved_sym, symbol, clean_sym, f"{clean_sym}#"]
             seen = set()
             ordered_candidates = [s for s in candidates if not (s in seen or seen.add(s))]
 
@@ -133,7 +142,10 @@ class MarketPacketCompiler:
                         return df
                 return None
 
-            return await mt5_actor.run_quote(_fetch)
+            result_df = await mt5_actor.run_quote(_fetch)
+            if result_df is not None:
+                cache_manager.store_df(cache_key, result_df)
+            return result_df
         except Exception as e:
             logger.debug(f"Failed to fetch MT5 historical bars for {symbol} ({timeframe}): {e}")
             return None
@@ -146,8 +158,9 @@ class MarketPacketCompiler:
         try:
             import MetaTrader5 as mt5
 
+            resolved_sym = resolve_marketwatch_symbol(symbol)
             clean_sym = symbol.rstrip("#")
-            candidates = [symbol, clean_sym, f"{clean_sym}#"]
+            candidates = [resolved_sym, symbol, clean_sym, f"{clean_sym}#"]
             seen = set()
             ordered_candidates = [s for s in candidates if not (s in seen or seen.add(s))]
 

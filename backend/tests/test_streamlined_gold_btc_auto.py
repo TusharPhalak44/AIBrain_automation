@@ -85,7 +85,7 @@ def test_strict_2pair_focus_and_strategy_unbind(db_session):
     """Verify only Gold and Bitcoin are active and strategy FKs are unbound."""
     assert "GOLD#" in XM_ACTIVE_SYMBOLS
     assert "BTCUSD#" in XM_ACTIVE_SYMBOLS
-    assert len(XM_ACTIVE_SYMBOLS) == 2
+    assert len(XM_ACTIVE_SYMBOLS) == 14
 
     # Verify symbol resolution strictly handles aliases
     assert resolve_broker_symbol("GOLD", db=db_session) == "GOLD#"
