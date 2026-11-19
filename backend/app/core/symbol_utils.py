@@ -3,7 +3,7 @@
 import urllib.parse
 from sqlalchemy.orm import Session
 from backend.app.db.models import TradingPairBot
-from backend.app.ai_brain.instruments import INSTRUMENT_UNIVERSE
+from backend.app.core.instruments import INSTRUMENT_UNIVERSE, resolve_mt5_symbol
 
 XM_ACTIVE_SYMBOLS = list(INSTRUMENT_UNIVERSE.keys())
 

@@ -14,112 +14,32 @@ from decimal import Decimal
 import logging
 from typing import Any, Dict, Optional, Tuple
 from backend.app.core.clock_sync import get_broker_time
+from backend.app.core.instruments import INSTRUMENT_UNIVERSE
 from backend.app.db.session import SessionLocal
 from backend.app.db.models import TradingPairBot
 
 logger = logging.getLogger(__name__)
 
-# Accurate XM Ultra Low (#) / Standard Fallback Defaults
-XM_FALLBACK_SPECS: Dict[str, Dict[str, Any]] = {
-    "GOLD#": {
-        "asset_class": "METAL",
-        "contract_size": 100.0,
-        "tick_size": 0.01,
-        "tick_value": 1.0,
-        "digits": 2,
-        "volume_min": 0.01,
-        "volume_step": 0.01,
-        "swap_long": -27.50,
-        "swap_short": 14.20,
-        "three_day_swap_day": 2,  # Wednesday (Python weekday 2)
-        "default_slippage_pts": 2,
-        "default_spread_pts": 25,
-    },
-    "EURUSD#": {
-        "asset_class": "FOREX",
-        "contract_size": 100000.0,
-        "tick_size": 0.00001,
-        "tick_value": 1.0,
-        "digits": 5,
-        "volume_min": 0.01,
-        "volume_step": 0.01,
-        "swap_long": -6.80,
-        "swap_short": 2.10,
-        "three_day_swap_day": 2,
-        "default_slippage_pts": 2,
-        "default_spread_pts": 12,
-    },
-    "GBPUSD#": {
-        "asset_class": "FOREX",
-        "contract_size": 100000.0,
-        "tick_size": 0.00001,
-        "tick_value": 1.0,
-        "digits": 5,
-        "volume_min": 0.01,
-        "volume_step": 0.01,
-        "swap_long": -4.50,
-        "swap_short": -1.20,
-        "three_day_swap_day": 2,
-        "default_slippage_pts": 2,
-        "default_spread_pts": 15,
-    },
-    "USDJPY#": {
-        "asset_class": "FOREX",
-        "contract_size": 100000.0,
-        "tick_size": 0.001,
-        "tick_value": 0.67,
-        "digits": 3,
-        "volume_min": 0.01,
-        "volume_step": 0.01,
-        "swap_long": 10.50,
-        "swap_short": -18.00,
-        "three_day_swap_day": 2,
-        "default_slippage_pts": 2,
-        "default_spread_pts": 14,
-    },
-    "BTCUSD#": {
-        "asset_class": "CRYPTO",
-        "contract_size": 1.0,
-        "tick_size": 0.01,
-        "tick_value": 0.01,
-        "digits": 2,
-        "volume_min": 0.01,
-        "volume_step": 0.01,
-        "swap_long": -15.00,
-        "swap_short": -15.00,
-        "three_day_swap_day": 2,
-        "default_slippage_pts": 15,
-        "default_spread_pts": 35,
-    },
-    "ETHUSD#": {
-        "asset_class": "CRYPTO",
-        "contract_size": 1.0,
-        "tick_size": 0.01,
-        "tick_value": 0.01,
-        "digits": 2,
-        "volume_min": 0.01,
-        "volume_step": 0.01,
-        "swap_long": -12.00,
-        "swap_short": -12.00,
-        "three_day_swap_day": 2,
-        "default_slippage_pts": 15,
-        "default_spread_pts": 30,
-    },
-    "SOLUSD#": {
-        "asset_class": "CRYPTO",
-        "contract_size": 1.0,
-        "tick_size": 0.01,
-        "tick_value": 0.01,
-        "digits": 2,
-        "volume_min": 0.01,
-        "volume_step": 0.01,
-        "swap_long": -10.00,
-        "swap_short": -10.00,
-        "three_day_swap_day": 2,
-        "default_slippage_pts": 15,
-        "default_spread_pts": 40,
-    },
-}
+# Build complete XM Fallback specs from centralized SSOT INSTRUMENT_UNIVERSE
+XM_FALLBACK_SPECS: Dict[str, Dict[str, Any]] = {}
+for _sym, _spec in INSTRUMENT_UNIVERSE.items():
+    _entry = {
+        "asset_class": _spec.asset_class,
+        "contract_size": _spec.contract_size,
+        "tick_size": _spec.tick_size,
+        "tick_value": _spec.tick_value,
+        "digits": _spec.digits,
+        "volume_min": _spec.volume_min,
+        "volume_step": _spec.volume_step,
+        "swap_long": _spec.swap_long,
+        "swap_short": _spec.swap_short,
+        "three_day_swap_day": _spec.three_day_swap_day,
+        "default_slippage_pts": _spec.default_slippage_points,
+        "default_spread_pts": _spec.default_spread_points,
+    }
+    XM_FALLBACK_SPECS[_sym] = _entry
+    # Also register without '#'
+    XM_FALLBACK_SPECS[_sym.rstrip("#")] = _entry
 
 
 @dataclass

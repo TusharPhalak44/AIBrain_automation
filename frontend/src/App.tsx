@@ -1,9 +1,11 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import {
   LayoutDashboard,
   Brain,
   BookOpen,
   BarChart3,
+  FlaskConical,
+  Command,
 } from "lucide-react";
 import { useLiveStore } from "./hooks/useLiveStore";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -11,22 +13,38 @@ import { TopCommandBar } from "./components/TopCommandBar";
 import { CockpitTab } from "./components/tabs/CockpitTab";
 import { AIBrainTab } from "./components/tabs/AIBrainTab";
 import { TradeBookTab } from "./components/tabs/TradeBookTab";
+import { StrategyLabTab } from "./components/tabs/StrategyLabTab";
 import { UsageAnalyticsTab } from "./components/tabs/UsageAnalyticsTab";
 import { SettingsModal } from "./components/tabs/SettingsModal";
+import { QuickSymbolSwitcher } from "./components/common/QuickSymbolSwitcher";
 import { ToastProvider, useToast } from "./components/Toast";
+import { getInstrument, getSymbolSession } from "./constants/instruments";
 
-type ActiveTab = "COCKPIT" | "AI_SUPERVISOR" | "TRADE_BOOK" | "USAGE_BILLING";
+type ActiveTab = "COCKPIT" | "AI_SUPERVISOR" | "TRADE_BOOK" | "STRATEGY_LAB" | "USAGE_BILLING";
 
 const AppContent: React.FC = () => {
   const store = useLiveStore();
   const [currentTab, setCurrentTab] = useState<ActiveTab>("COCKPIT");
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isQuickSwitcherOpen, setIsQuickSwitcherOpen] = useState(false);
   const toast = useToast();
+
+  // Keyboard shortcut listener for Ctrl+K Quick Switcher
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setIsQuickSwitcherOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
 
   const handlePanicFlatten = async () => {
     try {
       const res = await store.panicFlatten();
-      toast.warning("Panic Flatten Executed", res.message || "All positions flattened.");
+      toast.warning("Panic Flatten Executed", res.message || "All positions flattened across 14 pairs.");
     } catch (e: any) {
       toast.error("Panic Flatten Failed", e.message || String(e));
     }
@@ -50,8 +68,13 @@ const AppContent: React.FC = () => {
     }
   };
 
+  const activeInst = getInstrument(store.selectedSymbol);
+  const activeSessionTag = getSymbolSession(store.selectedSymbol);
+  const pairSched = store.pairSchedules[store.selectedSymbol];
+  const nextScanSec = pairSched?.next_scan_seconds ?? pairSched?.seconds_remaining;
+
   return (
-    <div className="min-h-screen bg-[#0B0E14] text-slate-100 flex flex-col font-sans">
+    <div className="min-h-screen bg-[#080c14] text-slate-100 flex flex-col font-sans selection:bg-cyan-500/30">
       {/* Top Fixed Command & Risk Bar */}
       <TopCommandBar
         accountType={store.accountType}
@@ -66,20 +89,24 @@ const AppContent: React.FC = () => {
         dailyDdPct={store.dailyDdPct}
         weeklyDdPct={store.weeklyDdPct}
         riskState={store.riskState}
+        openExposureCount={store.openPositions.length}
+        activeSession={activeSessionTag}
+        nextScanSeconds={nextScanSec}
         onSwitchAccount={handleSwitchAccount}
         onSwitchMode={handleSwitchMode}
         onPanicFlatten={handlePanicFlatten}
         onOpenSettings={() => setIsSettingsOpen(true)}
+        onOpenQuickSwitcher={() => setIsQuickSwitcherOpen(true)}
       />
 
       {/* Primary Navigation Ribbon */}
-      <nav className="bg-[#0E131D] border-b border-slate-800/80 px-4 flex items-center justify-between text-xs font-semibold">
-        <div className="flex items-center gap-1">
+      <nav className="bg-[#0b101b] border-b border-slate-800/80 px-4 flex items-center justify-between text-xs font-semibold">
+        <div className="flex items-center gap-1 overflow-x-auto scrollbar-none">
           <button
             onClick={() => setCurrentTab("COCKPIT")}
-            className={`flex items-center gap-2 py-3 px-4 border-b-2 transition ${
+            className={`flex items-center gap-2 py-2.5 px-3.5 border-b-2 transition font-mono ${
               currentTab === "COCKPIT"
-                ? "border-blue-500 text-blue-400 font-bold bg-blue-950/20"
+                ? "border-cyan-500 text-cyan-400 font-bold bg-cyan-950/20"
                 : "border-transparent text-slate-400 hover:text-slate-200"
             }`}
           >
@@ -89,9 +116,9 @@ const AppContent: React.FC = () => {
 
           <button
             onClick={() => setCurrentTab("AI_SUPERVISOR")}
-            className={`flex items-center gap-2 py-3 px-4 border-b-2 transition ${
+            className={`flex items-center gap-2 py-2.5 px-3.5 border-b-2 transition font-mono ${
               currentTab === "AI_SUPERVISOR"
-                ? "border-blue-500 text-blue-400 font-bold bg-blue-950/20"
+                ? "border-cyan-500 text-cyan-400 font-bold bg-cyan-950/20"
                 : "border-transparent text-slate-400 hover:text-slate-200"
             }`}
           >
@@ -101,9 +128,9 @@ const AppContent: React.FC = () => {
 
           <button
             onClick={() => setCurrentTab("TRADE_BOOK")}
-            className={`flex items-center gap-2 py-3 px-4 border-b-2 transition ${
+            className={`flex items-center gap-2 py-2.5 px-3.5 border-b-2 transition font-mono ${
               currentTab === "TRADE_BOOK"
-                ? "border-blue-500 text-blue-400 font-bold bg-blue-950/20"
+                ? "border-cyan-500 text-cyan-400 font-bold bg-cyan-950/20"
                 : "border-transparent text-slate-400 hover:text-slate-200"
             }`}
           >
@@ -112,8 +139,20 @@ const AppContent: React.FC = () => {
           </button>
 
           <button
+            onClick={() => setCurrentTab("STRATEGY_LAB")}
+            className={`flex items-center gap-2 py-2.5 px-3.5 border-b-2 transition font-mono ${
+              currentTab === "STRATEGY_LAB"
+                ? "border-cyan-500 text-cyan-400 font-bold bg-cyan-950/20"
+                : "border-transparent text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            <FlaskConical className="w-4 h-4" />
+            <span>STRATEGY LAB & BACKTEST</span>
+          </button>
+
+          <button
             onClick={() => setCurrentTab("USAGE_BILLING")}
-            className={`flex items-center gap-2 py-3 px-4 border-b-2 transition ${
+            className={`flex items-center gap-2 py-2.5 px-3.5 border-b-2 transition font-mono ${
               currentTab === "USAGE_BILLING"
                 ? "border-cyan-500 text-cyan-400 font-bold bg-cyan-950/20"
                 : "border-transparent text-slate-400 hover:text-slate-200"
@@ -124,17 +163,27 @@ const AppContent: React.FC = () => {
           </button>
         </div>
 
-        {/* Selected Pair Indicator */}
+        {/* Selected Pair Indicator + Ctrl+K shortcut */}
         <div className="hidden sm:flex items-center gap-2 text-slate-400 text-xs">
-          <span>Active Instrument:</span>
-          <span className="font-bold text-white bg-slate-900 border border-slate-800 px-2.5 py-0.5 rounded font-mono">
-            {store.selectedSymbol} ({store.selectedTimeframe})
-          </span>
+          <button
+            onClick={() => setIsQuickSwitcherOpen(true)}
+            className="flex items-center gap-2 px-2.5 py-1 rounded bg-[#0f1623] hover:bg-[#151f32] border border-slate-800 text-slate-300 transition group"
+            title="Press Ctrl+K to change instrument"
+          >
+            <span className="text-[10px] text-slate-500 uppercase font-mono">Pair:</span>
+            <span className="font-bold text-white font-mono group-hover:text-cyan-300">
+              {activeInst.symbol}
+            </span>
+            <span className="text-[10px] text-cyan-400 font-mono">({store.selectedTimeframe})</span>
+            <kbd className="text-[9px] bg-slate-900 border border-slate-700/80 px-1 rounded text-slate-400">
+              ⌘K
+            </kbd>
+          </button>
         </div>
       </nav>
 
       {/* Main Workspace Area Wrapped in ErrorBoundary */}
-      <main className="flex-1 p-4 overflow-y-auto">
+      <main className="flex-1 p-3.5 overflow-y-auto">
         <ErrorBoundary>
           {currentTab === "COCKPIT" && (
             <CockpitTab
@@ -147,6 +196,8 @@ const AppContent: React.FC = () => {
               plannedTrades={store.plannedTrades}
               pairSchedules={store.pairSchedules}
               quotes={store.quotes}
+              equity={store.equity}
+              balance={store.balance}
               onSelectSymbol={store.setSelectedSymbol}
               onSelectTimeframe={store.setSelectedTimeframe}
               onApproveCopilot={store.approveCopilot}
@@ -163,9 +214,22 @@ const AppContent: React.FC = () => {
 
           {currentTab === "TRADE_BOOK" && <TradeBookTab />}
 
+          {currentTab === "STRATEGY_LAB" && (
+            <StrategyLabTab selectedSymbol={store.selectedSymbol} />
+          )}
+
           {currentTab === "USAGE_BILLING" && <UsageAnalyticsTab />}
         </ErrorBoundary>
       </main>
+
+      {/* Quick Pair Switcher Modal (Ctrl+K) */}
+      <QuickSymbolSwitcher
+        isOpen={isQuickSwitcherOpen}
+        onClose={() => setIsQuickSwitcherOpen(false)}
+        selectedSymbol={store.selectedSymbol}
+        onSelectSymbol={store.setSelectedSymbol}
+        quotes={store.quotes}
+      />
 
       {/* Settings Modal */}
       <SettingsModal
@@ -185,5 +249,3 @@ export const App: React.FC = () => {
     </ToastProvider>
   );
 };
-
-

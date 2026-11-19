@@ -104,6 +104,7 @@ def create_app(enable_lifespan_tasks: bool = True) -> FastAPI:
     app.include_router(settings_route.router, prefix="/api")
     app.include_router(accounts.router, prefix="/api")
     app.include_router(pairs.router, prefix="/api")
+    app.include_router(pairs.instruments_router, prefix="/api")
     app.include_router(trades.router, prefix="/api")
     app.include_router(reports.router, prefix="/api")
     app.include_router(telegram.router, prefix="/api")

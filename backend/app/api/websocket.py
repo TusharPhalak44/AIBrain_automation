@@ -118,9 +118,10 @@ async def get_live_state() -> dict:
                         "trade_allowed": bool(acc.trade_allowed) and bool(term.trade_allowed if term else True),
                     }
 
-                # Strict 2-Pair Focus: GOLD# and BTCUSD# ONLY
+                # Multi-Asset Universe: Stream live quotes for all 14 instruments
                 ticks_data = {}
-                symbols = ["GOLD#", "BTCUSD#"]
+                from backend.app.core.instruments import INSTRUMENT_UNIVERSE
+                symbols = list(INSTRUMENT_UNIVERSE.keys())
                 for sym in symbols:
                     mt5.symbol_select(sym, True)
                     tick = mt5.symbol_info_tick(sym)

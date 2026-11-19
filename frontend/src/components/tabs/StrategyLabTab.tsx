@@ -425,10 +425,28 @@ export const StrategyLabTab: React.FC<StrategyLabTabProps> = ({
               <select
                 value={backtestSymbol}
                 onChange={(e) => setBacktestSymbol(e.target.value)}
-                className="w-full bg-slate-900 border border-slate-800 text-slate-100 rounded-lg px-2 py-1.5 font-bold"
+                className="w-full bg-slate-900 border border-slate-800 text-slate-100 rounded-lg px-2 py-1.5 font-bold font-mono text-xs"
               >
-                <option value="GOLD#">GOLD# (Spot Gold)</option>
-                <option value="BTCUSD#">BTCUSD# (Bitcoin CFD)</option>
+                <optgroup label="Forex Majors (6)">
+                  <option value="EURUSD#">EURUSD# (EUR/USD)</option>
+                  <option value="USDJPY#">USDJPY# (USD/JPY)</option>
+                  <option value="GBPUSD#">GBPUSD# (GBP/USD)</option>
+                  <option value="USDCAD#">USDCAD# (USD/CAD)</option>
+                  <option value="AUDUSD#">AUDUSD# (AUD/USD)</option>
+                  <option value="GBPJPY#">GBPJPY# (GBP/JPY)</option>
+                </optgroup>
+                <optgroup label="Commodities & Energy (4)">
+                  <option value="GOLD#">GOLD# (Spot Gold 100 oz)</option>
+                  <option value="SILVER#">SILVER# (Spot Silver 5000 oz)</option>
+                  <option value="OILCash#">OILCash# (WTI Crude Oil)</option>
+                  <option value="BRENTCash#">BRENTCash# (Brent Crude)</option>
+                </optgroup>
+                <optgroup label="Crypto 24/7 CFDs (4)">
+                  <option value="BTCUSD#">BTCUSD# (Bitcoin CFD)</option>
+                  <option value="ETHUSD#">ETHUSD# (Ethereum CFD)</option>
+                  <option value="SOLUSD#">SOLUSD# (Solana CFD)</option>
+                  <option value="XRPUSD#">XRPUSD# (Ripple CFD)</option>
+                </optgroup>
               </select>
             </div>
 
@@ -437,13 +455,15 @@ export const StrategyLabTab: React.FC<StrategyLabTabProps> = ({
               <select
                 value={backtestTf}
                 onChange={(e) => setBacktestTf(e.target.value)}
-                className="w-full bg-slate-900 border border-slate-800 text-slate-100 rounded-lg px-2 py-1.5"
+                className="w-full bg-slate-900 border border-slate-800 text-slate-100 rounded-lg px-2 py-1.5 font-mono text-xs"
               >
-                <option value="M5">M5</option>
-                <option value="M15">M15</option>
-                <option value="H1">H1</option>
-                <option value="H4">H4</option>
-                <option value="D1">D1</option>
+                <option value="M1">M1 (1 Minute)</option>
+                <option value="M5">M5 (5 Minutes)</option>
+                <option value="M15">M15 (15 Minutes)</option>
+                <option value="M30">M30 (30 Minutes)</option>
+                <option value="H1">H1 (1 Hour)</option>
+                <option value="H4">H4 (4 Hours)</option>
+                <option value="D1">D1 (Daily)</option>
               </select>
             </div>
 

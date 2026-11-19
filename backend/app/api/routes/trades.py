@@ -3,13 +3,112 @@
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from backend.app.core.clock_sync import to_ist_str, now_utc
+from backend.app.core.instruments import resolve_mt5_symbol, get_symbol_spec, format_symbol_price
+from backend.app.core.risk_engine import risk_engine
 from backend.app.db.models import TradeLedger, AppSettings, MT5AccountProfile
 from backend.app.db.session import get_db
 from backend.app.mt5_bridge.connector import mt5_connector
+from backend.app.mt5_bridge.mt5_actor import mt5_actor, PriorityLevel
 
 router = APIRouter(prefix="/trades", tags=["Trades & Execution"])
+
+
+class ExecuteOrderSchema(BaseModel):
+    symbol: str = Field(..., description="Target instrument e.g. GOLD#, EURUSD#, BTCUSD#")
+    order_type: str = Field(..., description="'BUY' or 'SELL'")
+    lots: float = Field(0.01, ge=0.01, le=100.0, description="Volume in lots")
+    sl: float = Field(..., description="Mandatory hard stop-loss price (Zero-Naked Invariant)")
+    tp: Optional[float] = Field(None, description="Optional take-profit price")
+    comment: Optional[str] = Field("Manual Portal Execution", description="Order comment")
+
+
+@router.post("/execute")
+async def execute_manual_order(payload: ExecuteOrderSchema, db: Session = Depends(get_db)):
+    """Execute manual BUY or SELL order with mandatory hard broker SL and risk checks."""
+    if payload.sl <= 0:
+        raise HTTPException(status_code=400, detail="MANDATORY_SL_REQUIRED: Stop-loss must be strictly greater than 0.")
+
+    import MetaTrader5 as mt5
+
+    if not mt5_connector.is_connected:
+        raise HTTPException(status_code=503, detail="MT5 terminal is disconnected. Cannot execute trade.")
+
+    target_sym = resolve_mt5_symbol(payload.symbol)
+    spec = get_symbol_spec(payload.symbol)
+
+    def _send():
+        if not mt5.terminal_info():
+            return False, "MT5 terminal not initialized", None
+
+        mt5.symbol_select(target_sym, True)
+        tick = mt5.symbol_info_tick(target_sym)
+        info = mt5.symbol_info(target_sym)
+
+        if not tick or not info:
+            return False, f"Could not retrieve live price tick for {target_sym}", None
+
+        is_buy = payload.order_type.upper() == "BUY"
+        price = tick.ask if is_buy else tick.bid
+        order_action = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
+
+        # Geometry validation
+        if is_buy and payload.sl >= price:
+            return False, f"Invalid BUY geometry: SL ({payload.sl}) must be strictly below current Ask ({price})", None
+        if not is_buy and payload.sl <= price:
+            return False, f"Invalid SELL geometry: SL ({payload.sl}) must be strictly above current Bid ({price})", None
+
+        # Build order request
+        req = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": target_sym,
+            "volume": float(payload.lots),
+            "type": order_action,
+            "price": float(price),
+            "sl": float(payload.sl),
+            "tp": float(payload.tp) if payload.tp and payload.tp > 0 else 0.0,
+            "deviation": 20,
+            "magic": 999999,  # Manual execution magic
+            "comment": payload.comment or "Manual Portal V2",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_IOC,
+        }
+
+        # Try IOC then RETURN if broker requires
+        res = mt5.order_send(req)
+        if res and res.retcode != mt5.TRADE_RETCODE_DONE:
+            req["type_filling"] = mt5.ORDER_FILLING_RETURN
+            res = mt5.order_send(req)
+
+        if res is None:
+            return False, "Order send returned None from MT5", None
+
+        if res.retcode == mt5.TRADE_RETCODE_DONE:
+            return True, "Executed successfully", {
+                "order": res.order,
+                "deal": res.deal,
+                "volume": res.volume,
+                "price": res.price,
+            }
+        else:
+            return False, f"MT5 order rejected (retcode {res.retcode}): {res.comment}", None
+
+    ok, msg, res_data = await mt5_actor.execute(PriorityLevel.P1_POSITIONS, _send)
+    if not ok:
+        raise HTTPException(status_code=400, detail={"error": "ORDER_REJECTED", "message": msg})
+
+    return {
+        "status": "SUCCESS",
+        "symbol": target_sym,
+        "order_type": payload.order_type.upper(),
+        "lots": payload.lots,
+        "executed_price": res_data.get("price") if res_data else None,
+        "ticket": res_data.get("order") if res_data else None,
+        "message": msg,
+        "timestamp_ist": to_ist_str(now_utc()),
+    }
 
 
 @router.get("/live-summary")

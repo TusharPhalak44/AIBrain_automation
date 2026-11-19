@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import {
   BarChart3,
   Calendar,
@@ -13,9 +13,20 @@ import {
   Layers,
   Clock,
   CheckCircle2,
+  TrendingUp,
+  TrendingDown,
+  Globe,
 } from "lucide-react";
 import { api } from "../../services/api";
 import { useToast } from "../Toast";
+import { fmtUsd, fmtPct, safeArr } from "../../utils/format";
+import {
+  INSTRUMENTS,
+  AssetClass,
+  getInstrument,
+  getAssetClassColor,
+  formatSymbolPrice,
+} from "../../constants/instruments";
 
 interface RateCard {
   model_id: string;
@@ -45,6 +56,7 @@ export const UsageAnalyticsTab: React.FC = () => {
   const [isFreeTierActive, setIsFreeTierActive] = useState<boolean>(false);
   const [isRateModalOpen, setIsRateModalOpen] = useState(false);
   const [editingRates, setEditingRates] = useState<RateCard[]>([]);
+  const [trades, setTrades] = useState<any[]>([]);
 
   const fetchSummary = useCallback(async () => {
     setLoading(true);
@@ -60,6 +72,14 @@ export const UsageAnalyticsTab: React.FC = () => {
       });
       setSummary(data);
       setIsFreeTierActive(data.free_tier_active || false);
+
+      // Hydrate trades for Performance Matrix & Session Heatmap
+      try {
+        const tradeData = await api.trades.getHistory({ limit: 300 });
+        setTrades(safeArr(tradeData));
+      } catch (err) {
+        console.warn("Could not fetch trade history for analytics:", err);
+      }
     } catch (e: any) {
       toast.error("Failed to load usage data", e.message || String(e));
     } finally {
@@ -136,6 +156,88 @@ export const UsageAnalyticsTab: React.FC = () => {
     month_cost_usd: 0,
     run_rate_30d_usd: 0,
   };
+
+  // Compute 14-Pair Performance Matrix
+  const pairPerformance = useMemo(() => {
+    return INSTRUMENTS.map((inst) => {
+      const symTrades = trades.filter(
+        (t) => t.symbol === inst.symbol || t.symbol === inst.symbol.replace("#", "")
+      );
+      const closed = symTrades.filter((t) => t.status === "CLOSED");
+      const wins = closed.filter((t) => (t.net_pnl || 0) > 0);
+      const losses = closed.filter((t) => (t.net_pnl || 0) <= 0);
+      const winRate = closed.length > 0 ? (wins.length / closed.length) * 100 : 0;
+      const grossWins = wins.reduce((acc, t) => acc + (t.gross_pnl || 0), 0);
+      const grossLosses = Math.abs(losses.reduce((acc, t) => acc + (t.gross_pnl || 0), 0));
+      const profitFactor = grossLosses > 0 ? (grossWins / grossLosses).toFixed(2) : grossWins > 0 ? "∞" : "0.00";
+      const netPnl = closed.reduce((acc, t) => acc + (t.net_pnl || 0), 0);
+      const netR = closed.reduce((acc, t) => acc + (t.r_multiple || 0), 0);
+      const avgWin = wins.length > 0 ? grossWins / wins.length : 0;
+      const avgLoss = losses.length > 0 ? grossLosses / losses.length : 0;
+      const expectancy = closed.length > 0 ? (winRate / 100) * avgWin - ((100 - winRate) / 100) * avgLoss : 0;
+
+      let totalHoldMin = 0;
+      let holdCount = 0;
+      closed.forEach((t) => {
+        if (t.opened_at_utc && t.closed_at_utc) {
+          const diffMs = new Date(t.closed_at_utc).getTime() - new Date(t.opened_at_utc).getTime();
+          if (diffMs > 0) {
+            totalHoldMin += diffMs / (1000 * 60);
+            holdCount++;
+          }
+        }
+      });
+      const avgHoldMin = holdCount > 0 ? Math.round(totalHoldMin / holdCount) : 0;
+
+      return {
+        ...inst,
+        totalTrades: closed.length,
+        wins: wins.length,
+        losses: losses.length,
+        winRate,
+        profitFactor,
+        netPnl,
+        netR,
+        expectancy,
+        avgHoldMin,
+      };
+    });
+  }, [trades]);
+
+  // Compute Symbol x Session Heatmap
+  const SESSIONS = ["Tokyo (Asian)", "London Open", "NY Overlap", "24/7 Crypto"] as const;
+  const sessionHeatmap = useMemo(() => {
+    const map: Record<string, Record<string, { count: number; netPnl: number; wins: number }>> = {};
+    INSTRUMENTS.forEach((inst) => {
+      map[inst.symbol] = {
+        "Tokyo (Asian)": { count: 0, netPnl: 0, wins: 0 },
+        "London Open": { count: 0, netPnl: 0, wins: 0 },
+        "NY Overlap": { count: 0, netPnl: 0, wins: 0 },
+        "24/7 Crypto": { count: 0, netPnl: 0, wins: 0 },
+      };
+    });
+
+    trades.filter((t) => t.status === "CLOSED").forEach((t) => {
+      const sym = t.symbol.endsWith("#") ? t.symbol : `${t.symbol}#`;
+      if (!map[sym]) return;
+      const inst = getInstrument(sym);
+
+      let sess = "24/7 Crypto";
+      if (!inst.is24_7 && t.opened_at_utc) {
+        const hour = new Date(t.opened_at_utc).getUTCHours();
+        if (hour < 7) sess = "Tokyo (Asian)";
+        else if (hour < 12) sess = "London Open";
+        else sess = "NY Overlap";
+      }
+      map[sym][sess].count++;
+      map[sym][sess].netPnl += t.net_pnl || 0;
+      if ((t.net_pnl || 0) > 0) {
+        map[sym][sess].wins++;
+      }
+    });
+
+    return map;
+  }, [trades]);
 
   return (
     <div className="space-y-4">
@@ -243,12 +345,30 @@ export const UsageAnalyticsTab: React.FC = () => {
         <select
           value={selectedSymbol}
           onChange={(e) => setSelectedSymbol(e.target.value)}
-          className="bg-slate-950 border border-slate-800 rounded px-2.5 py-1 text-slate-200 focus:outline-none focus:border-cyan-500 font-bold"
+          className="bg-slate-950 border border-slate-800 rounded px-2.5 py-1 text-slate-200 focus:outline-none focus:border-cyan-500 font-bold font-mono text-xs"
         >
-          <option value="">All Pairs</option>
-          <option value="GOLD#">GOLD# (Spot Gold)</option>
-          <option value="BTCUSD#">BTCUSD# (Bitcoin CFD)</option>
+          <option value="">All 14 Pairs + Global</option>
           <option value="GLOBAL">GLOBAL (System / Forensics)</option>
+          <optgroup label="Forex Majors (6)">
+            <option value="EURUSD#">EURUSD# (EUR/USD)</option>
+            <option value="USDJPY#">USDJPY# (USD/JPY)</option>
+            <option value="GBPUSD#">GBPUSD# (GBP/USD)</option>
+            <option value="USDCAD#">USDCAD# (USD/CAD)</option>
+            <option value="AUDUSD#">AUDUSD# (AUD/USD)</option>
+            <option value="GBPJPY#">GBPJPY# (GBP/JPY)</option>
+          </optgroup>
+          <optgroup label="Commodities & Energy (4)">
+            <option value="GOLD#">GOLD# (Spot Gold)</option>
+            <option value="SILVER#">SILVER# (Spot Silver)</option>
+            <option value="OILCash#">OILCash# (WTI Crude)</option>
+            <option value="BRENTCash#">BRENTCash# (Brent Crude)</option>
+          </optgroup>
+          <optgroup label="Crypto 24/7 (4)">
+            <option value="BTCUSD#">BTCUSD# (Bitcoin CFD)</option>
+            <option value="ETHUSD#">ETHUSD# (Ethereum CFD)</option>
+            <option value="SOLUSD#">SOLUSD# (Solana CFD)</option>
+            <option value="XRPUSD#">XRPUSD# (Ripple CFD)</option>
+          </optgroup>
         </select>
 
         {/* Model */}
@@ -482,6 +602,171 @@ export const UsageAnalyticsTab: React.FC = () => {
               <div className="text-center text-slate-500 text-xs py-8">No data available</div>
             )}
           </div>
+        </div>
+      </div>
+
+      {/* 14-Pair Performance Matrix (Win %, Profit Factor, Net R, Expectancy, Hold Time) */}
+      <div className="bg-[#0f1623] border border-slate-800/80 rounded-xl p-4 shadow-lg">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <TrendingUp className="w-4 h-4 text-cyan-400" />
+            <h3 className="text-xs font-bold text-white uppercase tracking-wider font-mono">
+              14-Pair Multi-Asset Performance Matrix
+            </h3>
+          </div>
+          <span className="text-[10px] text-slate-400 font-mono">Realized MT5 Ledger Analytics</span>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-xs font-mono text-slate-300">
+            <thead>
+              <tr className="border-b border-slate-800 bg-[#080c14] text-[10px] text-slate-500 uppercase">
+                <th className="p-2.5">Symbol</th>
+                <th className="p-2.5">Asset Class</th>
+                <th className="p-2.5 text-center">Trades</th>
+                <th className="p-2.5 text-center">Win Rate</th>
+                <th className="p-2.5 text-center">Profit Factor</th>
+                <th className="p-2.5 text-right">Net R</th>
+                <th className="p-2.5 text-right">Net PnL ($)</th>
+                <th className="p-2.5 text-right">Expectancy</th>
+                <th className="p-2.5 text-right">Avg Hold</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800/40">
+              {pairPerformance.map((row) => {
+                const color = getAssetClassColor(row.assetClass);
+                const hasTrades = row.totalTrades > 0;
+                return (
+                  <tr key={row.symbol} className="hover:bg-slate-900/40 transition">
+                    <td className="p-2.5 font-bold text-white">
+                      <div className="flex items-center gap-1.5">
+                        <span>{row.symbol}</span>
+                        {row.is24_7 && (
+                          <span className="text-[8px] bg-purple-950 text-purple-300 border border-purple-800 px-1 rounded">
+                            24/7
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="p-2.5">
+                      <span className={`text-[9px] px-1.5 py-0.2 rounded font-mono ${color.badge}`}>
+                        {row.assetClass}
+                      </span>
+                    </td>
+                    <td className="p-2.5 text-center tabular-nums text-slate-200">
+                      {row.totalTrades}
+                    </td>
+                    <td className="p-2.5 text-center tabular-nums font-semibold">
+                      {hasTrades ? (
+                        <span className={row.winRate >= 50 ? "text-emerald-400" : "text-amber-400"}>
+                          {fmtPct(row.winRate)}
+                        </span>
+                      ) : (
+                        <span className="text-slate-600">-</span>
+                      )}
+                    </td>
+                    <td className="p-2.5 text-center tabular-nums text-cyan-300 font-semibold">
+                      {hasTrades ? row.profitFactor : "-"}
+                    </td>
+                    <td className="p-2.5 text-right tabular-nums">
+                      {hasTrades ? (
+                        <span className={row.netR >= 0 ? "text-emerald-400" : "text-rose-400"}>
+                          {row.netR >= 0 ? `+${row.netR.toFixed(1)}R` : `${row.netR.toFixed(1)}R`}
+                        </span>
+                      ) : (
+                        <span className="text-slate-600">-</span>
+                      )}
+                    </td>
+                    <td className="p-2.5 text-right font-bold tabular-nums">
+                      {hasTrades ? (
+                        <span className={row.netPnl >= 0 ? "text-emerald-400" : "text-rose-400"}>
+                          {fmtUsd(row.netPnl, true)}
+                        </span>
+                      ) : (
+                        <span className="text-slate-600">$0.00</span>
+                      )}
+                    </td>
+                    <td className="p-2.5 text-right tabular-nums text-slate-300">
+                      {hasTrades ? fmtUsd(row.expectancy, true) : "-"}
+                    </td>
+                    <td className="p-2.5 text-right tabular-nums text-slate-400 text-[11px]">
+                      {hasTrades ? `${row.avgHoldMin}m` : "-"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Visual Symbol x Trading Session Heatmap */}
+      <div className="bg-[#0f1623] border border-slate-800/80 rounded-xl p-4 shadow-lg">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <Globe className="w-4 h-4 text-indigo-400" />
+            <h3 className="text-xs font-bold text-white uppercase tracking-wider font-mono">
+              Symbol × Trading Session Realized Heatmap
+            </h3>
+          </div>
+          <span className="text-[10px] text-slate-400 font-mono">Tokyo · London · NY · 24/7 Crypto</span>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-center text-xs font-mono">
+            <thead>
+              <tr className="border-b border-slate-800 bg-[#080c14] text-[10px] text-slate-500 uppercase">
+                <th className="p-2.5 text-left">Instrument</th>
+                {SESSIONS.map((sess) => (
+                  <th key={sess} className="p-2.5">
+                    {sess}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800/40">
+              {INSTRUMENTS.map((inst) => {
+                const row = sessionHeatmap[inst.symbol] || {};
+                return (
+                  <tr key={inst.symbol} className="hover:bg-slate-900/40 transition">
+                    <td className="p-2.5 text-left font-bold text-white text-[11px]">
+                      {inst.symbol}
+                    </td>
+                    {SESSIONS.map((sess) => {
+                      const data = row[sess] || { count: 0, netPnl: 0, wins: 0 };
+                      const winRate = data.count > 0 ? (data.wins / data.count) * 100 : 0;
+                      let bgClass = "bg-slate-900/40 text-slate-600";
+                      if (data.count > 0) {
+                        if (data.netPnl > 0) {
+                          bgClass = "bg-emerald-950/60 text-emerald-300 border border-emerald-800/40";
+                        } else if (data.netPnl < 0) {
+                          bgClass = "bg-rose-950/60 text-rose-300 border border-rose-800/40";
+                        } else {
+                          bgClass = "bg-slate-800/60 text-slate-300";
+                        }
+                      }
+                      return (
+                        <td key={sess} className="p-1.5">
+                          <div className={`py-1.5 px-2 rounded-lg text-[10px] tabular-nums ${bgClass}`}>
+                            {data.count > 0 ? (
+                              <div>
+                                <div className="font-bold">{fmtUsd(data.netPnl, true)}</div>
+                                <div className="text-[9px] opacity-80">
+                                  {data.count}t · {fmtPct(winRate)}
+                                </div>
+                              </div>
+                            ) : (
+                              <span>-</span>
+                            )}
+                          </div>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       </div>
 

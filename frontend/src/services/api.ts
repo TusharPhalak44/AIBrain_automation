@@ -91,6 +91,10 @@ export const api = {
       }),
   },
 
+  instruments: {
+    getAll: () => request<any[]>("/api/instruments"),
+  },
+
   pairs: {
     list: () => request<any[]>("/api/pairs"),
     update: (symbol: string, payload: any) =>
@@ -119,6 +123,18 @@ export const api = {
       if (params.limit) q.append("limit", String(params.limit));
       return request<any[]>(`/api/trades?${q.toString()}`);
     },
+    executeManualOrder: (payload: {
+      symbol: string;
+      order_type: "BUY" | "SELL";
+      lots: number;
+      sl: number;
+      tp?: number;
+      comment?: string;
+    }) =>
+      request<any>("/api/trades/execute", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      }),
     panicFlatten: () =>
       request<any>("/api/trades/panic-flatten", {
         method: "POST",

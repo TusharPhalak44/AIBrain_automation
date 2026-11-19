@@ -4,14 +4,27 @@
  * NEVER invoke raw .toFixed() or .toLocaleString() in component JSX!
  */
 
+import {
+  formatSymbolPrice,
+  getSymbolDigits,
+  getInstrument,
+  isMarketOpen,
+  getSymbolSession,
+} from "../constants/instruments";
+
+export { formatSymbolPrice, getSymbolDigits, getInstrument, isMarketOpen, getSymbolSession };
+
 /**
- * Format a price value with configurable decimal places.
+ * Format a price value with configurable decimal places or symbol-aware precision.
  */
-export function fmtPrice(val: unknown, digits: number = 2): string {
+export function fmtPrice(val: unknown, digitsOrSymbol: number | string = 2): string {
   if (val === null || val === undefined || val === "") return "-";
   const num = typeof val === "number" ? val : parseFloat(String(val));
   if (!Number.isFinite(num)) return "-";
-  return num.toFixed(digits);
+  if (typeof digitsOrSymbol === "string") {
+    return formatSymbolPrice(digitsOrSymbol, num);
+  }
+  return num.toFixed(digitsOrSymbol);
 }
 
 /**

@@ -33,6 +33,7 @@ import {
 } from "lucide-react";
 import { fmtPct, fmtConfidence, safeArr, safeStr } from "../../utils/format";
 import { PairSchedule } from "../../hooks/useLiveStore";
+import { INSTRUMENTS, getInstrument } from "../../constants/instruments";
 import { api } from "../../services/api";
 import { useToast } from "../Toast";
 
@@ -113,6 +114,8 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
 
   // Asset Class Filter
   const [assetClassFilter, setAssetClassFilter] = useState<"ALL" | "FOREX" | "COMMODITIES" | "CRYPTO">("ALL");
+  const [rulesSymbolFilter, setRulesSymbolFilter] = useState<string>("");
+  const [rulesClassFilter, setRulesClassFilter] = useState<"ALL" | "FOREX" | "COMMODITIES" | "CRYPTO">("ALL");
 
   // Cache Hygiene State
   const [cacheStatus, setCacheStatus] = useState<CacheStatus | null>(null);
@@ -980,8 +983,8 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
       {/* 6. RULES VAULT & AI SUPERVISORY ANALYSIS FEED */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
         {/* Left Column: Self-Learned Rules Vault (5 cols) */}
-        <div className="lg:col-span-5 bg-[#121824] border border-slate-800 rounded-xl p-4">
-          <div className="font-bold text-white text-xs flex items-center justify-between mb-3">
+        <div className="lg:col-span-5 bg-[#0f1623] border border-slate-800/80 rounded-xl p-4 shadow-lg">
+          <div className="font-bold text-white text-xs flex items-center justify-between mb-2">
             <div className="flex items-center gap-2">
               <BookOpen className="w-4 h-4 text-emerald-400" />
               <span>SELF-LEARNED RULES VAULT ({learnedRules.length})</span>
@@ -989,13 +992,63 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
             <span className="text-[10px] text-slate-400 font-mono">Immune System</span>
           </div>
 
+          {/* Asset Class & Symbol Filters */}
+          <div className="flex items-center justify-between gap-2 mb-3 pt-1 border-t border-slate-800/60">
+            <div className="flex items-center gap-1">
+              {(["ALL", "FOREX", "COMMODITIES", "CRYPTO"] as const).map((cls) => (
+                <button
+                  key={cls}
+                  onClick={() => setRulesClassFilter(cls)}
+                  className={`text-[9px] px-1.5 py-0.5 rounded font-mono font-medium transition ${
+                    rulesClassFilter === cls
+                      ? "bg-cyan-500 text-slate-950 font-bold"
+                      : "bg-slate-900 text-slate-400 hover:text-white"
+                  }`}
+                >
+                  {cls === "ALL" ? "All" : cls === "COMMODITIES" ? "Metals" : cls}
+                </button>
+              ))}
+            </div>
+
+            <select
+              value={rulesSymbolFilter}
+              onChange={(e) => setRulesSymbolFilter(e.target.value)}
+              className="bg-slate-900 border border-slate-800 text-slate-200 rounded px-1.5 py-0.5 text-[10px] font-mono focus:outline-none"
+            >
+              <option value="">All 14 Pairs</option>
+              {INSTRUMENTS.map((inst: any) => (
+                <option key={inst.symbol} value={inst.symbol}>
+                  {inst.symbol}
+                </option>
+              ))}
+            </select>
+          </div>
+
           <div className="space-y-2 max-h-[380px] overflow-y-auto pr-1">
-            {learnedRules.length === 0 ? (
-              <div className="text-slate-500 text-xs py-6 text-center">
-                No self-learned rules created yet.
+            {learnedRules
+              .filter((r) => {
+                if (rulesSymbolFilter && r.symbol !== rulesSymbolFilter) return false;
+                if (rulesClassFilter !== "ALL") {
+                  const inst = getInstrument(r.symbol);
+                  if (inst.assetClass !== rulesClassFilter) return false;
+                }
+                return true;
+              })
+              .length === 0 ? (
+              <div className="text-slate-500 text-xs py-6 text-center font-mono">
+                No rules match the selected filter criteria.
               </div>
             ) : (
-              learnedRules.map((r) => {
+              learnedRules
+                .filter((r) => {
+                  if (rulesSymbolFilter && r.symbol !== rulesSymbolFilter) return false;
+                  if (rulesClassFilter !== "ALL") {
+                    const inst = getInstrument(r.symbol);
+                    if (inst.assetClass !== rulesClassFilter) return false;
+                  }
+                  return true;
+                })
+                .map((r) => {
                 const isLive = r.status === "LIVE";
                 return (
                   <div

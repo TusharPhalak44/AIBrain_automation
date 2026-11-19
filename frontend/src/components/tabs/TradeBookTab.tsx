@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import {
   FileText,
   Download,
@@ -9,13 +9,27 @@ import {
   XCircle,
   ExternalLink,
   Send,
+  Loader2,
+  ChevronRight,
+  TrendingUp,
+  TrendingDown,
+  Layers,
 } from "lucide-react";
 import { fmtPrice, fmtUsd, fmtLots, fmtPct, safeArr, safeStr } from "../../utils/format";
+import {
+  INSTRUMENTS,
+  AssetClass,
+  getInstrument,
+  getAssetClassColor,
+  formatSymbolPrice,
+} from "../../constants/instruments";
 import { api } from "../../services/api";
 import { useToast } from "../Toast";
 
 export const TradeBookTab: React.FC = () => {
   const [trades, setTrades] = useState<any[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [selectedAssetClass, setSelectedAssetClass] = useState<"ALL" | AssetClass>("ALL");
   const [filterSymbol, setFilterSymbol] = useState<string>("");
   const [filterMode, setFilterMode] = useState<string>("");
   const [filterStatus, setFilterStatus] = useState<string>("");
@@ -26,11 +40,14 @@ export const TradeBookTab: React.FC = () => {
   const toast = useToast();
 
   const fetchTrades = async () => {
+    setIsLoading(true);
     try {
-      const data = safeArr<any>(await api.trades.getHistory({ limit: 100 }));
+      const data = safeArr<any>(await api.trades.getHistory({ limit: 150 }));
       setTrades(data);
     } catch (e: any) {
       console.error("Failed to fetch trades:", e);
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -67,197 +84,306 @@ export const TradeBookTab: React.FC = () => {
     }
   };
 
-  // Filtered trades
-  const filtered = trades.filter((t) => {
-    if (filterSymbol && !t.symbol.toLowerCase().includes(filterSymbol.toLowerCase())) return false;
-    if (filterMode && t.mode !== filterMode) return false;
-    if (filterStatus && t.status !== filterStatus) return false;
-    return true;
-  });
+  // Filtered trades across 14 symbols, asset classes & trade modes
+  const filtered = useMemo(() => {
+    return trades.filter((t) => {
+      const inst = getInstrument(t.symbol);
+      if (selectedAssetClass !== "ALL" && inst.assetClass !== selectedAssetClass) return false;
+      if (filterSymbol && !t.symbol.toUpperCase().includes(filterSymbol.toUpperCase())) return false;
+      if (filterMode && t.mode !== filterMode) return false;
+      if (filterStatus && t.status !== filterStatus) return false;
+      return true;
+    });
+  }, [trades, selectedAssetClass, filterSymbol, filterMode, filterStatus]);
 
   // Calculate KPIs
-  const closedTrades = filtered.filter((t) => t.status === "CLOSED");
-  const totalNet = closedTrades.reduce((acc, t) => acc + (t.net_pnl || 0), 0);
-  const totalGross = closedTrades.reduce((acc, t) => acc + (t.gross_pnl || 0), 0);
-  const totalSwap = closedTrades.reduce((acc, t) => acc + (t.swap || 0), 0);
-  const winCount = closedTrades.filter((t) => (t.net_pnl || 0) > 0).length;
+  const closedTrades = useMemo(() => filtered.filter((t) => t.status === "CLOSED"), [filtered]);
+  const totalNet = useMemo(() => closedTrades.reduce((acc, t) => acc + (t.net_pnl || 0), 0), [closedTrades]);
+  const totalGross = useMemo(() => closedTrades.reduce((acc, t) => acc + (t.gross_pnl || 0), 0), [closedTrades]);
+  const totalSwap = useMemo(() => closedTrades.reduce((acc, t) => acc + (t.swap || 0), 0), [closedTrades]);
+  const winCount = useMemo(() => closedTrades.filter((t) => (t.net_pnl || 0) > 0).length, [closedTrades]);
   const winRate = closedTrades.length > 0 ? (winCount / closedTrades.length) * 100 : 0;
+  const maxAbsPnl = useMemo(() => {
+    const vals = closedTrades.map((t) => Math.abs(t.net_pnl || 0));
+    return Math.max(...vals, 1.0);
+  }, [closedTrades]);
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3 font-sans">
       {/* Top KPI Summary & Export Toolbar */}
-      <div className="bg-[#121824] border border-slate-800 rounded-xl p-4 flex flex-wrap items-center justify-between gap-4">
-        <div className="flex flex-wrap items-center gap-6 text-xs">
+      <div className="bg-[#0f1623] border border-slate-800/80 rounded-xl p-3.5 flex flex-wrap items-center justify-between gap-4 shadow-lg">
+        <div className="flex flex-wrap items-center gap-5 text-xs font-mono">
           <div>
             <div className="text-[10px] text-slate-500 uppercase tracking-wider">Closed Trades</div>
-            <div className="font-bold text-white text-base font-mono">{closedTrades.length}</div>
+            <div className="font-bold text-white text-sm tabular-nums">{closedTrades.length}</div>
           </div>
-          <div className="h-8 w-px bg-slate-800" />
+          <div className="h-7 w-px bg-slate-800" />
           <div>
             <div className="text-[10px] text-slate-500 uppercase tracking-wider">Win Rate</div>
-            <div className="font-bold text-slate-200 text-base font-mono">{fmtPct(winRate)}</div>
+            <div className="font-bold text-slate-200 text-sm tabular-nums">{fmtPct(winRate)}</div>
           </div>
-          <div className="h-8 w-px bg-slate-800" />
+          <div className="h-7 w-px bg-slate-800" />
           <div>
             <div className="text-[10px] text-slate-500 uppercase tracking-wider">Total Net PnL</div>
             <div
-              className={`font-bold text-base font-mono ${
-                totalNet >= 0 ? "text-emerald-400" : "text-red-400"
+              className={`font-bold text-sm tabular-nums ${
+                totalNet >= 0 ? "text-emerald-400" : "text-rose-400"
               }`}
             >
               {fmtUsd(totalNet, true)}
             </div>
           </div>
-          <div className="h-8 w-px bg-slate-800" />
+          <div className="h-7 w-px bg-slate-800" />
           <div>
-            <div className="text-[10px] text-slate-500 uppercase tracking-wider">Total Swap Cost</div>
-            <div className="font-bold text-amber-400 text-base font-mono">{fmtUsd(totalSwap)}</div>
+            <div className="text-[10px] text-slate-500 uppercase tracking-wider">Swap Drag</div>
+            <div className="font-bold text-amber-400 text-sm tabular-nums">{fmtUsd(totalSwap)}</div>
           </div>
         </div>
 
         {/* Export Buttons */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5">
           <button
             onClick={() => handleExport("csv")}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg border border-slate-700 transition"
+            className="flex items-center gap-1 px-2.5 py-1 bg-slate-900 hover:bg-slate-800 text-slate-300 text-xs font-mono rounded-lg border border-slate-700/80 transition"
           >
-            <Download className="w-3.5 h-3.5" />
+            <Download className="w-3 h-3 text-cyan-400" />
             <span>CSV</span>
           </button>
           <button
             onClick={() => handleExport("excel")}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg border border-slate-700 transition"
+            className="flex items-center gap-1 px-2.5 py-1 bg-slate-900 hover:bg-slate-800 text-slate-300 text-xs font-mono rounded-lg border border-slate-700/80 transition"
           >
-            <Download className="w-3.5 h-3.5" />
+            <Download className="w-3 h-3 text-cyan-400" />
             <span>Excel</span>
           </button>
           <button
             onClick={() => handleExport("pdf")}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg border border-slate-700 transition"
+            className="flex items-center gap-1 px-2.5 py-1 bg-slate-900 hover:bg-slate-800 text-slate-300 text-xs font-mono rounded-lg border border-slate-700/80 transition"
           >
-            <Download className="w-3.5 h-3.5" />
+            <Download className="w-3 h-3 text-cyan-400" />
             <span>PDF</span>
           </button>
           <button
             onClick={handleTestTelegram}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600/90 hover:bg-blue-600 text-white text-xs font-bold rounded-lg transition"
+            className="flex items-center gap-1 px-2.5 py-1 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold text-xs font-mono rounded-lg transition"
             title="Dispatch test trade setup card to Telegram"
           >
-            <Send className="w-3.5 h-3.5" />
+            <Send className="w-3 h-3" />
             <span>Telegram Test</span>
           </button>
         </div>
       </div>
 
-      {/* Filter Bar */}
-      <div className="flex flex-wrap items-center gap-3 bg-[#121824] border border-slate-800 rounded-xl p-3 text-xs">
-        <div className="flex items-center gap-2 bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1">
-          <Search className="w-3.5 h-3.5 text-slate-400" />
-          <input
-            type="text"
-            value={filterSymbol}
-            onChange={(e) => setFilterSymbol(e.target.value)}
-            placeholder="Search Symbol (e.g. GOLD)"
-            className="bg-transparent text-slate-100 placeholder-slate-500 focus:outline-none"
-          />
+      {/* Filter Bar with Asset Class Pills + Multi-Pair Select */}
+      <div className="flex flex-wrap items-center justify-between gap-3 bg-[#0f1623] border border-slate-800/80 rounded-xl p-2.5 text-xs shadow-md">
+        {/* Left: Asset Class Pills */}
+        <div className="flex items-center gap-1">
+          {(["ALL", "FOREX", "COMMODITIES", "CRYPTO"] as const).map((cls) => {
+            const isSel = selectedAssetClass === cls;
+            return (
+              <button
+                key={cls}
+                onClick={() => setSelectedAssetClass(cls)}
+                className={`text-[10px] px-2.5 py-1 rounded-lg font-mono font-medium transition ${
+                  isSel
+                    ? "bg-cyan-500 text-slate-950 font-bold shadow-sm"
+                    : "bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800"
+                }`}
+              >
+                {cls === "ALL" ? "All Pairs (14)" : cls === "COMMODITIES" ? "Metals & Oil" : cls}
+              </button>
+            );
+          })}
         </div>
 
-        <select
-          value={filterMode}
-          onChange={(e) => setFilterMode(e.target.value)}
-          className="bg-slate-900 border border-slate-800 text-slate-200 rounded-lg px-2.5 py-1 font-semibold"
-        >
-          <option value="">All Modes</option>
-          <option value="SCALP">SCALP</option>
-          <option value="SWING">SWING</option>
-        </select>
+        {/* Right: Search + Dropdowns */}
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Symbol Search */}
+          <div className="flex items-center gap-1.5 bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1">
+            <Search className="w-3.5 h-3.5 text-slate-400" />
+            <input
+              type="text"
+              value={filterSymbol}
+              onChange={(e) => setFilterSymbol(e.target.value)}
+              placeholder="Search symbol (e.g. GOLD, EUR)..."
+              className="bg-transparent text-slate-100 placeholder-slate-500 focus:outline-none font-mono text-xs w-44"
+            />
+          </div>
 
-        <select
-          value={filterStatus}
-          onChange={(e) => setFilterStatus(e.target.value)}
-          className="bg-slate-900 border border-slate-800 text-slate-200 rounded-lg px-2.5 py-1 font-semibold"
-        >
-          <option value="">All Statuses</option>
-          <option value="CLOSED">CLOSED</option>
-          <option value="OPEN">OPEN</option>
-          <option value="PLANNED">PLANNED</option>
-        </select>
+          {/* 14 Pairs Quick Dropdown */}
+          <select
+            value={filterSymbol}
+            onChange={(e) => setFilterSymbol(e.target.value)}
+            className="bg-slate-900 border border-slate-800 text-slate-200 rounded-lg px-2 py-1 font-mono text-xs"
+          >
+            <option value="">All 14 Pairs</option>
+            <optgroup label="Forex Majors">
+              {INSTRUMENTS.filter((i) => i.assetClass === "FOREX").map((i) => (
+                <option key={i.symbol} value={i.symbol}>
+                  {i.symbol} ({i.name})
+                </option>
+              ))}
+            </optgroup>
+            <optgroup label="Commodities & Energy">
+              {INSTRUMENTS.filter((i) => i.assetClass === "COMMODITIES").map((i) => (
+                <option key={i.symbol} value={i.symbol}>
+                  {i.symbol} ({i.name})
+                </option>
+              ))}
+            </optgroup>
+            <optgroup label="Crypto 24/7">
+              {INSTRUMENTS.filter((i) => i.assetClass === "CRYPTO").map((i) => (
+                <option key={i.symbol} value={i.symbol}>
+                  {i.symbol} ({i.name})
+                </option>
+              ))}
+            </optgroup>
+          </select>
+
+          {/* Trade Mode Filter */}
+          <select
+            value={filterMode}
+            onChange={(e) => setFilterMode(e.target.value)}
+            className="bg-slate-900 border border-slate-800 text-slate-200 rounded-lg px-2 py-1 font-mono text-xs"
+          >
+            <option value="">All Styles</option>
+            <option value="SCALP">⚡ SCALP</option>
+            <option value="SWING">🌊 SWING</option>
+          </select>
+
+          {/* Status Filter */}
+          <select
+            value={filterStatus}
+            onChange={(e) => setFilterStatus(e.target.value)}
+            className="bg-slate-900 border border-slate-800 text-slate-200 rounded-lg px-2 py-1 font-mono text-xs"
+          >
+            <option value="">All Statuses</option>
+            <option value="CLOSED">CLOSED</option>
+            <option value="OPEN">OPEN</option>
+          </select>
+        </div>
       </div>
 
-      {/* Trade Ledger Table */}
-      <div className="bg-[#121824] border border-slate-800 rounded-xl overflow-hidden">
+      {/* Trade Ledger Table with Exact Symbol Decimals & Inline Magnitude Bars */}
+      <div className="bg-[#0f1623] border border-slate-800/80 rounded-xl overflow-hidden shadow-lg">
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs text-slate-300 font-mono">
             <thead>
-              <tr className="border-b border-slate-800 bg-[#0E131D] text-[10px] text-slate-500 uppercase">
-                <th className="p-3">ID</th>
-                <th className="p-3">Symbol</th>
-                <th className="p-3">Mode</th>
+              <tr className="border-b border-slate-800 bg-[#080c14] text-[10px] text-slate-500 uppercase sticky top-0">
+                <th className="p-3">Ticket / ID</th>
+                <th className="p-3">Instrument</th>
+                <th className="p-3">Style</th>
                 <th className="p-3">Type</th>
-                <th className="p-3">Lots</th>
-                <th className="p-3">Entry</th>
-                <th className="p-3">Exit</th>
+                <th className="p-3">Volume</th>
+                <th className="p-3">Entry Price</th>
+                <th className="p-3">Exit Price</th>
+                <th className="p-3">SL / TP</th>
                 <th className="p-3">Exit Reason</th>
                 <th className="p-3 text-right">Net PnL</th>
-                <th className="p-3 text-right">Action</th>
+                <th className="p-3 text-right">Forensic</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/40">
-              {filtered.length === 0 ? (
+              {isLoading ? (
                 <tr>
-                  <td colSpan={10} className="p-6 text-center text-slate-500">
-                    No trades match filter criteria.
+                  <td colSpan={11} className="p-8 text-center text-slate-400 font-mono">
+                    <Loader2 className="w-5 h-5 animate-spin mx-auto mb-2 text-cyan-400" />
+                    <span>Hydrating Trade History from MySQL...</span>
+                  </td>
+                </tr>
+              ) : filtered.length === 0 ? (
+                <tr>
+                  <td colSpan={11} className="p-8 text-center text-slate-500 font-mono">
+                    No trades match the selected filter criteria.
                   </td>
                 </tr>
               ) : (
                 filtered.map((t) => {
                   const isBuy = t.direction === "BUY";
                   const isSlHit = t.exit_reason === "SL_HIT";
+                  const inst = getInstrument(t.symbol);
+                  const color = getAssetClassColor(inst.assetClass);
+                  const pnl = t.net_pnl || 0;
+                  const pnlBarPct = Math.min((Math.abs(pnl) / maxAbsPnl) * 100, 100);
+
                   return (
-                    <tr key={t.id} className="hover:bg-slate-900/40 transition">
-                      <td className="p-3 text-slate-500">#{t.id}</td>
-                      <td className="p-3 font-bold text-white">{t.symbol}</td>
+                    <tr key={t.id} className="hover:bg-slate-900/50 transition relative group">
+                      <td className="p-3 text-slate-500 tabular-nums">#{t.position_id || t.id}</td>
                       <td className="p-3">
-                        <span className="text-[10px] bg-slate-800 text-slate-300 px-1.5 py-0.2 rounded font-sans">
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-bold text-white tracking-wide">{t.symbol}</span>
+                          <span className={`text-[8px] px-1 py-0.2 rounded font-mono ${color.badge}`}>
+                            {inst.assetClass.slice(0, 3)}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="p-3">
+                        <span
+                          className={`text-[9px] px-1.5 py-0.2 rounded font-mono font-bold ${
+                            t.mode === "SCALP"
+                              ? "bg-amber-950/60 text-amber-300 border border-amber-800/40"
+                              : "bg-indigo-950/60 text-indigo-300 border border-indigo-800/40"
+                          }`}
+                        >
                           {t.mode}
                         </span>
                       </td>
                       <td className="p-3 font-bold">
-                        <span className={isBuy ? "text-emerald-400" : "text-red-400"}>
+                        <span
+                          className={`text-[10px] px-1.5 py-0.2 rounded ${
+                            isBuy
+                              ? "bg-emerald-950 text-emerald-400 border border-emerald-800/50"
+                              : "bg-rose-950 text-rose-400 border border-rose-800/50"
+                          }`}
+                        >
                           {t.direction}
                         </span>
                       </td>
-                      <td className="p-3">{fmtLots(t.lots)}</td>
-                      <td className="p-3">{fmtPrice(t.entry_price)}</td>
-                      <td className="p-3">{fmtPrice(t.exit_price)}</td>
+                      <td className="p-3 tabular-nums">{fmtLots(t.lots)}</td>
+                      <td className="p-3 tabular-nums">{formatSymbolPrice(t.symbol, t.entry_price)}</td>
+                      <td className="p-3 tabular-nums text-slate-200">
+                        {t.exit_price ? formatSymbolPrice(t.symbol, t.exit_price) : "-"}
+                      </td>
+                      <td className="p-3 tabular-nums text-[11px]">
+                        <span className="text-rose-400">{formatSymbolPrice(t.symbol, t.sl)}</span>
+                        <span className="text-slate-600 mx-1">/</span>
+                        <span className="text-emerald-400">{formatSymbolPrice(t.symbol, t.tp1 || t.tp2)}</span>
+                      </td>
                       <td className="p-3">
                         <span
-                          className={`px-1.5 py-0.5 rounded text-[10px] font-sans font-bold ${
+                          className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-bold ${
                             isSlHit
-                              ? "bg-red-950/80 text-red-400 border border-red-800"
-                              : "bg-slate-800 text-slate-300"
+                              ? "bg-rose-950/80 text-rose-400 border border-rose-800/60"
+                              : t.exit_reason === "TP1_HIT" || t.exit_reason === "TP2_HIT"
+                              ? "bg-emerald-950/80 text-emerald-400 border border-emerald-800/60"
+                              : "bg-slate-900 text-slate-400"
                           }`}
                         >
                           {t.exit_reason || t.status}
                         </span>
                       </td>
-                      <td
-                        className={`p-3 text-right font-bold ${
-                          (t.net_pnl || 0) >= 0 ? "text-emerald-400" : "text-red-400"
-                        }`}
-                      >
-                        {fmtUsd(t.net_pnl, true)}
+                      <td className="p-3 text-right font-bold tabular-nums relative overflow-hidden">
+                        {/* Subtle inline P&L magnitude bar */}
+                        <div
+                          className={`absolute inset-y-0 right-0 opacity-15 pointer-events-none transition-all ${
+                            pnl >= 0 ? "bg-emerald-500" : "bg-rose-500"
+                          }`}
+                          style={{ width: `${pnlBarPct}%` }}
+                        />
+                        <span className={pnl >= 0 ? "text-emerald-400" : "text-rose-400"}>
+                          {fmtUsd(pnl, true)}
+                        </span>
                       </td>
                       <td className="p-3 text-right">
                         {isSlHit ? (
                           <button
                             onClick={() => setSelectedLossTrade(t)}
-                            className="px-2 py-1 bg-red-950 hover:bg-red-900 text-red-300 font-sans font-bold text-[10px] rounded border border-red-800/80 transition"
+                            className="px-2 py-0.5 bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-500/30 rounded text-[10px] font-mono transition"
                           >
                             Forensics
                           </button>
                         ) : (
-                          <span className="text-slate-600">-</span>
+                          <span className="text-slate-600 text-[10px]">-</span>
                         )}
                       </td>
                     </tr>
@@ -269,64 +395,56 @@ export const TradeBookTab: React.FC = () => {
         </div>
       </div>
 
-      {/* SL Post-Mortem Forensic Drawer / Modal */}
+      {/* Forensic Post-Mortem Modal Drawer */}
       {selectedLossTrade && (
-        <div className="fixed inset-0 bg-black/75 backdrop-blur-xs z-50 flex items-center justify-center p-4">
-          <div className="bg-[#121824] border border-red-500/40 rounded-xl p-6 max-w-lg w-full shadow-2xl space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <div className="flex items-center gap-2 text-red-400 font-bold text-sm">
-                <AlertOctagon className="w-5 h-5" />
-                <span>STOP-LOSS HIT POST-MORTEM FORENSICS</span>
+        <div className="fixed inset-0 bg-black/75 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-[#0f1623] border border-rose-500/50 rounded-2xl p-6 max-w-lg w-full shadow-2xl font-mono">
+            <div className="flex items-center gap-2 text-rose-400 font-bold text-sm mb-3">
+              <AlertOctagon className="w-5 h-5" />
+              <span>SL POST-MORTEM FORENSIC: #{selectedLossTrade.position_id || selectedLossTrade.id}</span>
+            </div>
+
+            <div className="bg-[#080c14] border border-slate-800 rounded-xl p-3 text-xs space-y-2 mb-4">
+              <div className="flex justify-between text-slate-400">
+                <span>Symbol:</span>
+                <strong className="text-white">{selectedLossTrade.symbol}</strong>
               </div>
+              <div className="flex justify-between text-slate-400">
+                <span>Entry / Exit:</span>
+                <span className="tabular-nums">
+                  {formatSymbolPrice(selectedLossTrade.symbol, selectedLossTrade.entry_price)} /{" "}
+                  {formatSymbolPrice(selectedLossTrade.symbol, selectedLossTrade.exit_price)}
+                </span>
+              </div>
+              <div className="flex justify-between text-slate-400">
+                <span>Net Loss:</span>
+                <span className="text-rose-400 font-bold tabular-nums">
+                  {fmtUsd(selectedLossTrade.net_pnl, true)}
+                </span>
+              </div>
+              {selectedLossTrade.loss_postmortem_text && (
+                <div className="pt-2 border-t border-slate-800 text-[11px] text-slate-300">
+                  <div className="text-slate-500 uppercase text-[9px] mb-1">Generated Immune Rule:</div>
+                  <div className="p-2 bg-slate-900 rounded border border-slate-700/60 text-cyan-300">
+                    {selectedLossTrade.loss_postmortem_text}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-2 text-xs font-mono">
               <button
                 onClick={() => setSelectedLossTrade(null)}
-                className="text-slate-400 hover:text-white text-xs font-bold"
+                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg"
               >
                 Close
               </button>
-            </div>
-
-            <div className="space-y-2 text-xs">
-              <div className="flex justify-between text-slate-300">
-                <span>Trade Ticket:</span>
-                <strong className="text-white">#{selectedLossTrade.id} ({selectedLossTrade.symbol})</strong>
-              </div>
-              <div className="flex justify-between text-slate-300">
-                <span>Setup & Direction:</span>
-                <strong className="text-white">{selectedLossTrade.mode} {selectedLossTrade.direction}</strong>
-              </div>
-              <div className="flex justify-between text-slate-300">
-                <span>Net Loss:</span>
-                <strong className="text-red-400 font-mono">{fmtUsd(selectedLossTrade.net_pnl, true)}</strong>
-              </div>
-              <div className="flex justify-between text-slate-300">
-                <span>Exit Price vs Hard SL:</span>
-                <strong className="text-white font-mono">
-                  {fmtPrice(selectedLossTrade.exit_price)} / {fmtPrice(selectedLossTrade.sl)}
-                </strong>
-              </div>
-            </div>
-
-            {/* Diagnostic Breakdown */}
-            <div className="bg-slate-900/90 rounded-lg p-3 border border-slate-800 text-xs">
-              <div className="text-[10px] text-slate-400 uppercase font-bold mb-1">
-                Forensic Diagnosis & Root Cause
-              </div>
-              <div className="text-slate-200 leading-relaxed font-sans">
-                {safeStr(
-                  selectedLossTrade.loss_postmortem_text,
-                  "No automated diagnosis text recorded yet. Click 'Run Forensic Post-Mortem' below."
-                )}
-              </div>
-            </div>
-
-            <div className="flex justify-end gap-2 pt-2">
               <button
                 disabled={isAnalyzingForensics}
                 onClick={() => handleRunForensics(selectedLossTrade.id)}
-                className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-lg text-xs transition"
+                className="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold rounded-lg flex items-center gap-1.5 disabled:opacity-50"
               >
-                {isAnalyzingForensics ? "Analyzing..." : "Run Forensic Post-Mortem"}
+                {isAnalyzingForensics ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <span>Synthesize Learned Rule</span>}
               </button>
             </div>
           </div>
@@ -335,4 +453,3 @@ export const TradeBookTab: React.FC = () => {
     </div>
   );
 };
-
