@@ -199,8 +199,12 @@ SECTION 1: LIVE TELEMETRY & PORTFOLIO PAYLOAD
 - Instrument & Digits: {symbol} ({asset_class} | Digits: {digits} | Pip/Tick Size: {pip_size})
 - Strategy Mode: {trade_style} (HTF Bias/Planning: {planning_tf} | LTF Trigger/Execution: {execution_tf})
 - Current UTC Time & Active Session: {utc_timestamp} ({active_session})
+- Rollover / Swap Window: {rollover_blackout_status} (Daily NY Rollover 21:50 - 23:10 UTC / Broker Midnight swap window)
 - Live MT5 Microstructure: Bid: {bid} | Ask: {ask} | Spread: {current_spread_points} pts ({spread_pct_of_sl}% of proposed SL)
 - Volatility Baseline: {planning_tf} ATR(14): {htf_atr} | {execution_tf} ATR(14): {ltf_atr} | ADR(14) Used Today: {adr_used_pct}%
+- Dealing Range Location ({planning_tf}): {dealing_range_pct}% (50% Equilibrium Rule: Forbid BUY > 75%, Forbid SELL < 25%)
+- Key Liquidity Levels: {key_liquidity_levels}
+- Execution TF Candlestick Anatomy: {last_3_candles_anatomy}
 - Upcoming Tier-1 Macro News (Next 60m): {upcoming_high_impact_news}
 - Active Open Portfolio Exposure: {open_positions_summary}
 
@@ -349,6 +353,7 @@ def build_supervisor_prompt(context: Dict[str, Any]) -> str:
         execution_tf=context.get("execution_tf", "M5"),
         utc_timestamp=utc_ts,
         active_session=context.get("active_session", "LONDON_OPEN"),
+        rollover_blackout_status=context.get("rollover_blackout_status", "INACTIVE (Normal Trading Hours)"),
         bid=context.get("bid", 0.0),
         ask=context.get("ask", 0.0),
         current_spread_points=context.get("current_spread_points", 0),
@@ -356,6 +361,9 @@ def build_supervisor_prompt(context: Dict[str, Any]) -> str:
         htf_atr=context.get("htf_atr", 1.25 if digits == 2 else 0.0015),
         ltf_atr=context.get("ltf_atr", 0.45 if digits == 2 else 0.0005),
         adr_used_pct=context.get("adr_used_pct", 45.0),
+        dealing_range_pct=context.get("dealing_range_pct", 50.0),
+        key_liquidity_levels=context.get("key_liquidity_levels", "PDH: N/A | PDL: N/A | HTF EMA21: N/A | HTF EMA50: N/A"),
+        last_3_candles_anatomy=context.get("last_3_candles_anatomy", "Standard candle range & volume (ATR mult ~1.0)"),
         upcoming_high_impact_news=context.get("upcoming_high_impact_news", "None (No Tier-1 news in next 60m)"),
         open_positions_summary=context.get("open_positions_summary", "None (Zero Exposure)"),
         active_learned_rules_json=context.get("active_learned_rules_json", "[]"),
@@ -772,16 +780,32 @@ class GeminiSupervisor:
         Execute supervisory analysis for a pair, save GeminiAnalysisReport to MySQL,
         and broadcast to WebSocket subscribers.
         """
-        close_db = False
+        close_initial_db = False
         if db is None:
-            db = SessionLocal()
-            close_db = True
+            initial_db = SessionLocal()
+            close_initial_db = True
+        else:
+            initial_db = db
 
         try:
-            client, model_name = self.get_client(db=db)
-            active_rules = self.get_active_rules(packet.symbol, db=db)
-            pattern_memory = self.get_pair_pattern_memory(packet.symbol, db=db)
+            client, model_name = self.get_client(db=initial_db)
+            active_rules = self.get_active_rules(packet.symbol, db=initial_db)
+            pattern_memory = self.get_pair_pattern_memory(packet.symbol, db=initial_db)
+            st = initial_db.query(AppSettings).filter_by(id=1).first()
+            pair_bot = initial_db.query(TradingPairBot).filter(
+                (TradingPairBot.symbol == packet.symbol) | (TradingPairBot.symbol == f"{packet.symbol}#")
+            ).first()
+            scalp_p_tf = getattr(st, "scalp_planning_tf", "M15") if st else "M15"
+            scalp_e_tf = getattr(st, "scalp_execution_tf", "M5") if st else "M5"
+            swing_p_tf = getattr(st, "swing_planning_tf", "H4") if st else "H4"
+            swing_e_tf = getattr(st, "swing_execution_tf", "H1") if st else "H1"
+            scan_mins = max(1, (st.global_scan_interval_sec if st else 300) // 60) if st else 5
+            max_sp = pair_bot.max_spread_points if pair_bot else 80
+        finally:
+            if close_initial_db:
+                initial_db.close()
 
+        try:
             analysis_result: Optional[GeminiSupervisoryOutput] = None
             response = None
             latency_ms = 0
@@ -829,17 +853,6 @@ class GeminiSupervisor:
                     last_err = None
                     chosen_model = clean_m
                     latency_ms = 0
-                    # Build Dynamic Institutional Supervisor Prompt
-                    st = db.query(AppSettings).filter_by(id=1).first()
-                    scalp_p_tf = getattr(st, "scalp_planning_tf", "M15")
-                    scalp_e_tf = getattr(st, "scalp_execution_tf", "M5")
-                    swing_p_tf = getattr(st, "swing_planning_tf", "H4")
-                    swing_e_tf = getattr(st, "swing_execution_tf", "H1")
-                    scan_mins = max(1, (st.global_scan_interval_sec if st else 300) // 60)
-                    pair_bot = db.query(TradingPairBot).filter(
-                        (TradingPairBot.symbol == packet.symbol) | (TradingPairBot.symbol == f"{packet.symbol}#")
-                    ).first()
-                    max_sp = pair_bot.max_spread_points if pair_bot else 80
 
                     spec = INSTRUMENT_UNIVERSE.get(packet.symbol) or INSTRUMENT_UNIVERSE.get(f"{packet.symbol}#")
                     digits = spec.digits if spec else 2
@@ -851,30 +864,81 @@ class GeminiSupervisor:
                     ltf_atr = round(packet_atr, digits) if packet_atr > 0 else (0.45 if digits == 2 else 0.0005)
 
                     is_scalp = bool(packet.candidate_signals.get("scalp_signal"))
+                    plan_tf = scalp_p_tf if is_scalp else swing_p_tf
+                    exec_tf = scalp_e_tf if is_scalp else swing_e_tf
+
+                    # Calculate quantitative features
+                    d1_breakdown = packet.timeframe_breakdown.get("D1", {})
+                    adr14 = float(d1_breakdown.get("atr14", 0.0))
+                    if adr14 > 0 and packet.pdh is not None and packet.pdl is not None:
+                        today_dist = abs(float(packet.bid) - float(packet.pdl))
+                        adr_used_pct = round(min(150.0, (today_dist / adr14) * 100.0), 1)
+                    else:
+                        adr_used_pct = 45.0
+
+                    plan_data = packet.timeframe_breakdown.get(plan_tf, {})
+                    p_highs = plan_data.get("key_highs", [])
+                    p_lows = plan_data.get("key_lows", [])
+                    if p_highs and p_lows:
+                        mx = max(p_highs)
+                        mn = min(p_lows)
+                        p_curr = float(packet.bid) if packet.bid > 0 else float(plan_data.get("close", 1.0))
+                        dealing_range_pct = round(max(0.0, min(100.0, ((p_curr - mn) / (mx - mn)) * 100.0)), 1) if mx > mn else 50.0
+                    else:
+                        dealing_range_pct = 50.0
+
+                    h1_d = packet.timeframe_breakdown.get("H1", {})
+                    h4_d = packet.timeframe_breakdown.get("H4", {})
+                    e21_val = h4_d.get("ema21") or h1_d.get("ema21", "N/A")
+                    e50_val = h4_d.get("ema50") or h1_d.get("ema50", "N/A")
+                    pdh_val = f"{packet.pdh:.{digits}f}" if packet.pdh is not None else "N/A"
+                    pdl_val = f"{packet.pdl:.{digits}f}" if packet.pdl is not None else "N/A"
+                    key_liquidity_levels = f"PDH: {pdh_val} | PDL: {pdl_val} | HTF EMA21: {e21_val} | HTF EMA50: {e50_val}"
+
+                    exec_d = packet.timeframe_breakdown.get(exec_tf, {})
+                    pats = exec_d.get("detected_patterns", [])
+                    pat_str = ", ".join(p.get("name", "") for p in pats[:3]) if pats else "Clean market structure"
+                    last_3_candles_anatomy = f"{exec_tf} PA: {pat_str} (ATR14: {ltf_atr}, RSI14: {exec_d.get('rsi14', 50.0)})"
+
+                    now_u = now_utc()
+                    is_roll = (now_u.hour == 21 and now_u.minute >= 50) or (now_u.hour == 22) or (now_u.hour == 23 and now_u.minute <= 10)
+                    rollover_blackout_status = "ACTIVE_BLACKOUT (21:50-23:10 UTC - Broker Server Rollover / Spread Blowout)" if is_roll else "INACTIVE (Liquid Trading Session)"
+
+                    open_trades = db.query(TradeLedger).filter(TradeLedger.status.in_(["OPEN", "PARTIAL_TP1"])).all()
+                    if open_trades:
+                        t_desc = [f"{t.symbol} {t.direction} {t.lots}L" for t in open_trades[:5]]
+                        open_positions_summary = f"{len(open_trades)} Open: [{', '.join(t_desc)}]"
+                    else:
+                        open_positions_summary = "None (Zero Exposure - 0/5 positions)"
+
                     prompt_context = {
                         "symbol": packet.symbol,
                         "asset_class": packet.asset_class,
                         "digits": digits,
                         "pip_size": pip_size,
                         "trade_style": "SCALP" if is_scalp else "SWING",
-                        "planning_tf": scalp_p_tf if is_scalp else swing_p_tf,
-                        "execution_tf": scalp_e_tf if is_scalp else swing_e_tf,
+                        "planning_tf": plan_tf,
+                        "execution_tf": exec_tf,
                         "utc_timestamp": now_utc().strftime("%Y-%m-%d %H:%M:%S UTC"),
                         "scan_interval_minutes": scan_mins,
                         "active_session": packet.session_tag,
+                        "rollover_blackout_status": rollover_blackout_status,
                         "bid": packet.bid,
                         "ask": packet.ask,
                         "current_spread_points": packet.spread_points,
                         "spread_pct_of_sl": round(float(packet.spread_points * 0.1), 1),
                         "htf_atr": htf_atr,
                         "ltf_atr": ltf_atr,
-                        "adr_used_pct": 45.0,
+                        "adr_used_pct": adr_used_pct,
+                        "dealing_range_pct": dealing_range_pct,
+                        "key_liquidity_levels": key_liquidity_levels,
+                        "last_3_candles_anatomy": last_3_candles_anatomy,
                         "upcoming_high_impact_news": (
                             f"{packet.news_blackout.get('event_title', 'Tier-1 Event')} ({packet.news_blackout.get('blackout_reason', 'Blackout')})"
                             if packet.news_blackout.get("is_blackout")
                             else "None (No Tier-1 news in next 60m)"
                         ),
-                        "open_positions_summary": "None (Zero Exposure)",
+                        "open_positions_summary": open_positions_summary,
                         "active_learned_rules_json": json.dumps(active_rules, indent=2),
                         "max_spread_points": max_sp,
                     }
@@ -981,26 +1045,38 @@ class GeminiSupervisor:
                 }),
             )
 
-            db.add(report)
-            db.commit()
-            db.refresh(report)
+            # Persist report using fresh or existing session
+            close_save_db = False
+            if db is None or close_initial_db:
+                save_db = SessionLocal()
+                close_save_db = True
+            else:
+                save_db = db
 
-            # Record token usage ledger if response returned
-            if response is not None:
-                try:
-                    record_gemini_usage(
-                        db=db,
-                        model_id=chosen_model,
-                        call_purpose="LIVE_SCAN",
-                        response=response,
-                        latency_ms=latency_ms,
-                        symbol=packet.symbol,
-                        account_type=account_type,
-                        report_id=report.id,
-                        http_status=200,
-                    )
-                except Exception as ex_usage:
-                    logger.warning(f"Failed to record usage ledger: {ex_usage}")
+            try:
+                save_db.add(report)
+                save_db.commit()
+                save_db.refresh(report)
+
+                # Record token usage ledger if response returned
+                if response is not None:
+                    try:
+                        record_gemini_usage(
+                            db=save_db,
+                            model_id=chosen_model,
+                            call_purpose="LIVE_SCAN",
+                            response=response,
+                            latency_ms=latency_ms,
+                            symbol=packet.symbol,
+                            account_type=account_type,
+                            report_id=report.id,
+                            http_status=200,
+                        )
+                    except Exception as ex_usage:
+                        logger.warning(f"Failed to record usage ledger: {ex_usage}")
+            finally:
+                if close_save_db:
+                    save_db.close()
 
             # Store in pre-trigger radar cache
             if upcoming_dict:
@@ -1035,9 +1111,9 @@ class GeminiSupervisor:
             await manager.broadcast(report_dict)
 
             return report
-        finally:
-            if close_db:
-                db.close()
+        except Exception as e:
+            logger.error(f"Error in analyze_pair for {packet.symbol}: {e}", exc_info=True)
+            raise
 
     def get_rendered_supervisor_prompt(self, symbol: str = "GOLD#", db: Optional[Session] = None) -> str:
         """Render the complete institutional system prompt with active symbol context for UI preview."""

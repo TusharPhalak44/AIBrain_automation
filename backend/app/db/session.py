@@ -68,9 +68,10 @@ def get_engine(database_url: str = None):
     return create_engine(
         url,
         pool_pre_ping=True,
-        pool_recycle=1800,
-        pool_size=10,
-        max_overflow=20,
+        pool_recycle=300,
+        pool_size=30,
+        max_overflow=50,
+        pool_timeout=60.0,
     )
 
 

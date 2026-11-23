@@ -10,7 +10,7 @@ Coordinates:
 """
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 import json
 import logging
@@ -29,6 +29,8 @@ from backend.app.db.models import (
 )
 from backend.app.mt5_bridge.connector import mt5_connector
 from backend.app.mt5_bridge.mt5_actor import mt5_actor, PriorityLevel
+from backend.app.mt5_bridge.deal_reconciler import reconcile_open_trades_with_mt5
+from backend.app.ai_brain.position_manager import position_manager
 from backend.app.telegram_reports.telegram_bot import telegram_service
 from backend.app.api.websocket import manager
 from backend.app.ai_brain.market_packet import market_packet_compiler, MarketPacket
@@ -37,6 +39,29 @@ from backend.app.ai_brain.instruments import is_symbol_trading_open
 from backend.app.ai_brain.cache_manager import cache_manager
 
 logger = logging.getLogger(__name__)
+
+# Correlation Buckets & FX Currencies
+CRUDE_SYMBOLS = {"OILCASH", "BRENTCASH"}
+METALS_SYMBOLS = {"GOLD", "SILVER", "XAUUSD", "XAGUSD"}
+CRYPTO_SYMBOLS = {"BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD"}
+FX_CURRENCIES = ["EUR", "GBP", "USD", "JPY", "AUD", "CAD", "NZD", "CHF"]
+
+
+def decompose_fx_symbol(symbol: str, direction: str) -> Optional[Tuple[str, str, str, str]]:
+    """
+    Decompose FX pair into base, quote, long_ccy, short_ccy.
+    Returns (base, quote, long_ccy, short_ccy) or None if not an FX pair.
+    """
+    clean = symbol.rstrip("#").upper()
+    for base in FX_CURRENCIES:
+        if clean.startswith(base):
+            quote = clean[len(base):]
+            if quote in FX_CURRENCIES:
+                if direction.upper() in ("BUY", "LONG"):
+                    return base, quote, base, quote
+                else:
+                    return base, quote, quote, base
+    return None
 
 
 class LiveIntervalScheduler:
@@ -47,10 +72,20 @@ class LiveIntervalScheduler:
         self._running: bool = False
         self._loop_task: Optional[asyncio.Task] = None
         self._broadcast_task: Optional[asyncio.Task] = None
+        self._protection_task: Optional[asyncio.Task] = None
+        self._reconcile_task: Optional[asyncio.Task] = None
 
         # Per-pair scheduler tracking state
         # symbol -> {"next_scan_utc": datetime, "interval_sec": int, "last_scan_ist": str, "status": str}
         self.pair_schedules: Dict[str, Dict[str, Any]] = {}
+
+        # Candle-close gate tracking: (base_sym, mode, execution_tf) -> last_scanned_candle_time
+        self._last_scanned_candle_time: Dict[Tuple[str, str, str], Any] = {}
+
+        # Daily Drawdown Circuit Breaker state
+        self.circuit_breaker_tripped: bool = False
+        self.circuit_breaker_until_utc: Optional[datetime] = None
+        self.circuit_breaker_reason: Optional[str] = None
 
     def _get_db(self) -> Session:
         return self.session_factory()
@@ -87,7 +122,7 @@ class LiveIntervalScheduler:
                 del self.pair_schedules[sym]
 
     async def start(self) -> None:
-        """Start async scanning and countdown broadcast background loops."""
+        """Start async scanning, countdown broadcast, trade protection, and reconciliation background loops."""
         if not self._running:
             self._running = True
             with self._get_db() as db:
@@ -95,7 +130,9 @@ class LiveIntervalScheduler:
 
             self._loop_task = asyncio.create_task(self._scheduler_loop())
             self._broadcast_task = asyncio.create_task(self._countdown_broadcast_loop())
-            logger.info("Live Interval Scheduler started.")
+            self._protection_task = asyncio.create_task(self._protection_loop())
+            self._reconcile_task = asyncio.create_task(self._reconcile_loop())
+            logger.info("Live Interval Scheduler, Protection & Reconciliation loops started.")
 
     async def stop(self) -> None:
         """Stop background scheduler loops."""
@@ -104,7 +141,37 @@ class LiveIntervalScheduler:
             self._loop_task.cancel()
         if self._broadcast_task and not self._broadcast_task.done():
             self._broadcast_task.cancel()
+        if self._protection_task and not self._protection_task.done():
+            self._protection_task.cancel()
+        if self._reconcile_task and not self._reconcile_task.done():
+            self._reconcile_task.cancel()
         logger.info("Live Interval Scheduler stopped.")
+
+    async def _protection_loop(self) -> None:
+        """Run position protection (Auto-BE + Partial Scale-Out) every 15 seconds."""
+        logger.info("Active trade protection background loop started (15s cadence).")
+        while self._running:
+            try:
+                with self._get_db() as db:
+                    await position_manager.manage_active_positions(db)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug(f"Protection loop note: {e}")
+            await asyncio.sleep(15.0)
+
+    async def _reconcile_loop(self) -> None:
+        """Run MT5 open trade reconciliation every 60 seconds."""
+        logger.info("MT5 deal reconciliation background loop started (60s cadence).")
+        while self._running:
+            try:
+                with self._get_db() as db:
+                    reconcile_open_trades_with_mt5(db)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug(f"Reconciliation loop note: {e}")
+            await asyncio.sleep(60.0)
 
     async def _countdown_broadcast_loop(self) -> None:
         """Broadcast live per-pair countdown telemetry every second on /ws/live."""
@@ -281,12 +348,337 @@ class LiveIntervalScheduler:
         except Exception as e:
             logger.debug(f"Pending limit monitor exception: {e}")
 
+    def _check_symbol_open_position_lock(self, symbol: str, db: Session) -> Tuple[bool, str]:
+        """
+        Strict 1-Position-Per-Symbol Lock (Zero Stacking, Zero Self-Hedging):
+        Normalizes base_sym = symbol.rstrip('#').upper().
+        Checks live MT5 positions & orders PLUS MySQL TradeLedger records.
+        If >= 1 open position or pending order exists in ANY mode (SCALP, SWING, MANUAL)
+        or ANY direction (BUY, SELL), blocks new entries immediately.
+        """
+        base_sym = symbol.rstrip("#").upper()
+
+        # 1. Check live MT5 broker positions & pending orders
+        if mt5_connector.is_connected:
+            try:
+                import MetaTrader5 as mt5
+                live_positions = mt5.positions_get()
+                if live_positions:
+                    for p in live_positions:
+                        if p.symbol.rstrip("#").upper() == base_sym:
+                            return (
+                                False,
+                                f"SKIP_POSITION_ALREADY_OPEN: Live MT5 position #{p.ticket} already active on {base_sym} ({p.type} {p.volume} lots)",
+                            )
+
+                live_orders = mt5.orders_get()
+                if live_orders:
+                    for o in live_orders:
+                        if o.symbol.rstrip("#").upper() == base_sym:
+                            return (
+                                False,
+                                f"SKIP_POSITION_ALREADY_OPEN: Resting MT5 order #{o.ticket} already exists on {base_sym}",
+                            )
+            except Exception as e:
+                logger.debug(f"MT5 position check error: {e}")
+
+        # 2. Check MySQL TradeLedger
+        active_db_trades = (
+            db.query(TradeLedger)
+            .filter(TradeLedger.status.in_(["OPEN", "PARTIAL_TP1", "PENDING"]))
+            .all()
+        )
+        for t in active_db_trades:
+            if t.symbol.rstrip("#").upper() == base_sym:
+                return (
+                    False,
+                    f"SKIP_POSITION_ALREADY_OPEN: Trade #{t.id} ({t.status} {t.direction} {t.mode}) already recorded on {base_sym}",
+                )
+
+        return True, "OK"
+
+    def _check_candle_close_gate(
+        self,
+        symbol: str,
+        mode: str,
+        execution_tf: str,
+        candle_time: Optional[Any] = None,
+    ) -> Tuple[bool, str]:
+        """
+        Candle-Close Execution Gate:
+        Ensures a symbol is evaluated only once per newly closed candle on its assigned execution_tf,
+        preventing intra-minute spam / tick chasing.
+        """
+        base_sym = symbol.rstrip("#").upper()
+        key = (base_sym, mode.upper(), execution_tf.upper())
+
+        if candle_time is None:
+            return True, "OK"
+
+        last_time = self._last_scanned_candle_time.get(key)
+        if last_time is not None and candle_time <= last_time:
+            return (
+                False,
+                f"SKIP_CANDLE_ALREADY_SCANNED: Candle {candle_time} already scanned on {base_sym} {execution_tf}",
+            )
+
+        return True, "OK"
+
+    def _check_post_exit_cooldown(self, symbol: str, mode: str, db: Session) -> Tuple[bool, str]:
+        """
+        Mandatory Post-Exit Cooldown Timer:
+        If last closed trade exit_reason was SL_HIT, MANUAL_MOBILE, MANUAL_TERMINAL, STOP_OUT, or MARGIN_STOP_OUT:
+        - 30 minutes for SCALP
+        - 240 minutes (4 hours) for SWING
+        """
+        base_sym = symbol.rstrip("#").upper()
+        cooldown_sec = 1800 if mode.upper() == "SCALP" else 14400
+
+        recent_trades = (
+            db.query(TradeLedger)
+            .filter(TradeLedger.status == "CLOSED")
+            .order_by(TradeLedger.closed_at_utc.desc())
+            .limit(50)
+            .all()
+        )
+
+        last_for_sym = None
+        for t in recent_trades:
+            if t.symbol.rstrip("#").upper() == base_sym:
+                last_for_sym = t
+                break
+
+        if last_for_sym and last_for_sym.closed_at_utc:
+            reason = last_for_sym.exit_reason or ""
+            if reason in ("SL_HIT", "MANUAL_MOBILE", "MANUAL_TERMINAL", "STOP_OUT", "MARGIN_STOP_OUT"):
+                closed_at = last_for_sym.closed_at_utc
+                if closed_at.tzinfo is None:
+                    closed_at = closed_at.replace(tzinfo=timezone.utc)
+                now = now_utc()
+                elapsed = (now - closed_at).total_seconds()
+                if elapsed < cooldown_sec:
+                    rem_sec = int(cooldown_sec - elapsed)
+                    return (
+                        False,
+                        f"COOLDOWN_ACTIVE: {base_sym} in cooldown after {reason} ({rem_sec}s remaining for {mode})",
+                    )
+
+        return True, "OK"
+
+    def _check_portfolio_and_correlation_caps(
+        self,
+        symbol: str,
+        direction: str,
+        proposed_risk_pct: float,
+        db: Session,
+    ) -> Tuple[bool, str]:
+        """
+        Enforce Portfolio Ceilings & Cross-Asset Correlation Buckets:
+        1. Max 5 concurrent global open positions.
+        2. Max 2.50% total open portfolio risk.
+        3. Energy Crude: Max 1 open position total across OILCash# and BRENTCash#.
+        4. Precious Metals: Max 1 open position in the same direction across GOLD# and SILVER#.
+        5. Crypto: Max 2 open positions total across BTCUSD#, ETHUSD#, SOLUSD#, XRPUSD#.
+        6. FX Currency Exposure: Max 2 directionally identical exposures to any single currency.
+        """
+        base_sym = symbol.rstrip("#").upper()
+
+        # Query all open trades in DB
+        open_trades = (
+            db.query(TradeLedger)
+            .filter(TradeLedger.status.in_(["OPEN", "PARTIAL_TP1", "PENDING"]))
+            .all()
+        )
+
+        # Global position ceiling
+        if len(open_trades) >= 5:
+            return False, f"PORTFOLIO_CAP_REACHED: Global limit of 5 concurrent open positions reached ({len(open_trades)} active)"
+
+        # Global risk ceiling
+        total_open_risk = sum(0.50 for _ in open_trades)  # standard 0.50% baseline risk per trade
+        if total_open_risk + proposed_risk_pct > 2.50 + 1e-4:
+            return (
+                False,
+                f"PORTFOLIO_RISK_CAP_BREACHED: Open risk ({total_open_risk:.2f}%) + proposed ({proposed_risk_pct:.2f}%) exceeds 2.50% ceiling",
+            )
+
+        # 1. Crude Energy Group
+        if base_sym in CRUDE_SYMBOLS:
+            for t in open_trades:
+                if t.symbol.rstrip("#").upper() in CRUDE_SYMBOLS:
+                    return (
+                        False,
+                        f"CORRELATION_LIMIT_ENERGY: Max 1 open position across OILCash# and BRENTCash# (Trade #{t.id} {t.symbol} is active)",
+                    )
+
+        # 2. Precious Metals Group
+        if base_sym in METALS_SYMBOLS:
+            for t in open_trades:
+                if t.symbol.rstrip("#").upper() in METALS_SYMBOLS and t.direction.upper() == direction.upper():
+                    return (
+                        False,
+                        f"CORRELATION_LIMIT_METALS: Max 1 open position in same direction ({direction}) for Metals (Trade #{t.id} {t.symbol} {t.direction} is active)",
+                    )
+
+        # 3. Crypto Group
+        if base_sym in CRYPTO_SYMBOLS:
+            crypto_count = sum(1 for t in open_trades if t.symbol.rstrip("#").upper() in CRYPTO_SYMBOLS)
+            if crypto_count >= 2:
+                return (
+                    False,
+                    f"CORRELATION_LIMIT_CRYPTO: Max 2 concurrent open positions for Crypto ({crypto_count} active)",
+                )
+
+        # 4. FX Currency Exposure
+        proposed_fx = decompose_fx_symbol(symbol, direction)
+        if proposed_fx:
+            _, _, p_long, p_short = proposed_fx
+            long_counts: Dict[str, int] = {c: 0 for c in FX_CURRENCIES}
+            short_counts: Dict[str, int] = {c: 0 for c in FX_CURRENCIES}
+
+            for t in open_trades:
+                decomp = decompose_fx_symbol(t.symbol, t.direction)
+                if decomp:
+                    _, _, t_long, t_short = decomp
+                    if t_long in long_counts:
+                        long_counts[t_long] += 1
+                    if t_short in short_counts:
+                        short_counts[t_short] += 1
+
+            if long_counts.get(p_long, 0) >= 2:
+                return (
+                    False,
+                    f"FX_CORRELATION_LIMIT: Adding {direction} {symbol} creates >2 Long exposures for {p_long} ({long_counts[p_long]} active)",
+                )
+            if short_counts.get(p_short, 0) >= 2:
+                return (
+                    False,
+                    f"FX_CORRELATION_LIMIT: Adding {direction} {symbol} creates >2 Short exposures for {p_short} ({short_counts[p_short]} active)",
+                )
+
+        return True, "OK"
+
+    def _check_daily_drawdown_circuit_breaker(self, db: Session) -> Tuple[bool, str]:
+        """
+        Daily Drawdown Circuit Breaker:
+        If (today_realized_pnl + floating_pnl) <= -3.0% of starting equity OR
+        4 consecutive SL_HIT trades occur today:
+        Pause autonomous entries until 00:05 UTC next day.
+        """
+        now = now_utc()
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        # Check existing active trip
+        if self.circuit_breaker_tripped:
+            if self.circuit_breaker_until_utc and now < self.circuit_breaker_until_utc:
+                return (
+                    False,
+                    f"CIRCUIT_BREAKER_ACTIVE: Tripped until {to_ist_str(self.circuit_breaker_until_utc)}: {self.circuit_breaker_reason}",
+                )
+            else:
+                self.circuit_breaker_tripped = False
+                self.circuit_breaker_reason = None
+                self.circuit_breaker_until_utc = None
+
+        # Fetch closed trades today
+        today_closed = (
+            db.query(TradeLedger)
+            .filter(
+                TradeLedger.status == "CLOSED",
+                TradeLedger.closed_at_utc >= today_start,
+            )
+            .all()
+        )
+        realized_today = sum(float(t.net_pnl or 0.0) for t in today_closed)
+
+        floating_today = 0.0
+        if mt5_connector.is_connected:
+            try:
+                import MetaTrader5 as mt5
+                pos = mt5.positions_get()
+                if pos:
+                    floating_today = sum(float(p.profit + p.swap) for p in pos)
+            except Exception:
+                pass
+
+        net_today = realized_today + floating_today
+
+        profile = db.query(MT5AccountProfile).filter_by(account_type="DEMO").first()
+        baseline_equity = float(profile.last_equity) if profile and profile.last_equity > 0 else 10000.0
+
+        if baseline_equity > 0:
+            dd_pct = (net_today / baseline_equity) * 100.0
+            if dd_pct <= -3.0:
+                self.circuit_breaker_tripped = True
+                self.circuit_breaker_until_utc = today_start + timedelta(days=1, minutes=5)
+                self.circuit_breaker_reason = f"Daily drawdown {dd_pct:.2f}% breached -3.00% equity limit"
+                logger.critical(f"Daily Drawdown Circuit Breaker Tripped! {self.circuit_breaker_reason}")
+                return False, f"CIRCUIT_BREAKER_TRIPPED: {self.circuit_breaker_reason}"
+
+        # 4 consecutive SL_HIT check
+        consecutive_sl = 0
+        sorted_today = sorted(
+            today_closed,
+            key=lambda t: t.closed_at_utc or today_start,
+            reverse=True,
+        )
+        for t in sorted_today:
+            if t.exit_reason == "SL_HIT":
+                consecutive_sl += 1
+            else:
+                break
+
+        if consecutive_sl >= 4:
+            self.circuit_breaker_tripped = True
+            self.circuit_breaker_until_utc = today_start + timedelta(days=1, minutes=5)
+            self.circuit_breaker_reason = f"4 consecutive SL_HIT trades today ({consecutive_sl} in a row)"
+            logger.critical(f"Daily Drawdown Circuit Breaker Tripped! {self.circuit_breaker_reason}")
+            return False, f"CIRCUIT_BREAKER_TRIPPED: {self.circuit_breaker_reason}"
+
+        return True, "OK"
+
+    def get_guardrail_status(self, db: Session) -> Dict[str, Any]:
+        """Telemetry snapshot for frontend risk guardrails bar."""
+        now = now_utc()
+        open_trades = (
+            db.query(TradeLedger)
+            .filter(TradeLedger.status.in_(["OPEN", "PARTIAL_TP1", "PENDING"]))
+            .all()
+        )
+        open_count = len(open_trades)
+        total_risk_pct = round(open_count * 0.50, 2)
+
+        # Check circuit breaker
+        is_tripped = bool(self.circuit_breaker_tripped and self.circuit_breaker_until_utc and now < self.circuit_breaker_until_utc)
+
+        # Check active cooldowns
+        cooldowns: Dict[str, str] = {}
+        for sym in list(self.pair_schedules.keys()):
+            ok_scalp, msg_scalp = self._check_post_exit_cooldown(sym, "SCALP", db)
+            if not ok_scalp:
+                cooldowns[sym] = msg_scalp
+
+        return {
+            "open_positions_count": open_count,
+            "max_positions_limit": 5,
+            "open_risk_pct": total_risk_pct,
+            "max_risk_limit_pct": 2.50,
+            "circuit_breaker": {
+                "status": "PAUSED" if is_tripped else "HEALTHY",
+                "tripped": is_tripped,
+                "reason": self.circuit_breaker_reason if is_tripped else None,
+                "until_ist": to_ist_str(self.circuit_breaker_until_utc) if is_tripped and self.circuit_breaker_until_utc else None,
+            },
+            "cooldowns": cooldowns,
+        }
+
     async def execute_pair_scan(
         self,
         symbol: str,
         custom_timeframe_dfs: Optional[Dict[str, Any]] = None,
         account_type: Optional[str] = None,
         db: Optional[Session] = None,
+        bypass_circuit_breaker: bool = False,
     ) -> Optional[GeminiAnalysisReport]:
         """
         Execute full supervisory scan for a pair:
@@ -316,6 +708,8 @@ class LiveIntervalScheduler:
                 logger.warning(f"Scan aborted: Pair '{symbol}' not found in database.")
                 return None
 
+            check_mode = "SCALP" if pair.scalp_enabled else "SWING"
+
             # Weekend Check: Skip FOREX and COMMODITIES when markets are closed, keep CRYPTO 24/7
             if not is_symbol_trading_open(symbol, pair.asset_class, now):
                 if symbol in self.pair_schedules:
@@ -325,18 +719,79 @@ class LiveIntervalScheduler:
                 logger.debug(f"Skipping scan for {symbol} ({pair.asset_class}): Market closed for weekend.")
                 return None
 
-            # 1. Compile MarketPacket
+            # 1. Strict 1-Position-Per-Symbol Lock (Zero Stacking, Zero Self-Hedging)
+            if not bypass_circuit_breaker:
+                lock_ok, lock_msg = self._check_symbol_open_position_lock(symbol, db)
+                if not lock_ok:
+                    if symbol in self.pair_schedules:
+                        self.pair_schedules[symbol]["last_scan_ist"] = to_ist_str(now)
+                        self.pair_schedules[symbol]["last_decision"] = "SKIP_POSITION_ALREADY_OPEN"
+                        self.pair_schedules[symbol]["status"] = "POS_OPEN"
+                    logger.info(f"Skipping scan for {symbol}: {lock_msg}")
+                    return None
+
+            # 2. Daily Drawdown Circuit Breaker
+            if not bypass_circuit_breaker:
+                cb_ok, cb_msg = self._check_daily_drawdown_circuit_breaker(db)
+                if not cb_ok:
+                    if symbol in self.pair_schedules:
+                        self.pair_schedules[symbol]["last_scan_ist"] = to_ist_str(now)
+                        self.pair_schedules[symbol]["last_decision"] = "CIRCUIT_BREAKER_ACTIVE"
+                        self.pair_schedules[symbol]["status"] = "CIRCUIT_BREAKER"
+                    logger.warning(f"Scan aborted for {symbol}: {cb_msg}")
+                    return None
+
+            # 3. Post-Exit Cooldown Gate
+            if not bypass_circuit_breaker:
+                cd_ok, cd_msg = self._check_post_exit_cooldown(symbol, check_mode, db)
+                if not cd_ok:
+                    if symbol in self.pair_schedules:
+                        self.pair_schedules[symbol]["last_scan_ist"] = to_ist_str(now)
+                        self.pair_schedules[symbol]["last_decision"] = "COOLDOWN_ACTIVE"
+                        self.pair_schedules[symbol]["status"] = "COOLDOWN"
+                    logger.info(f"Skipping scan for {symbol}: {cd_msg}")
+                    return None
+
+            # 4. Compile MarketPacket
             packet = await market_packet_compiler.compile_market_packet(
                 symbol=symbol,
                 timeframe_dfs=custom_timeframe_dfs,
                 db=db,
             )
 
-            # 2. Analyze with GeminiSupervisor
+            # 5. Candle-Close Execution Gate (Zero Intra-Minute Spam)
+            exec_tf = getattr(st, "scalp_execution_tf", "M5") if pair.scalp_enabled else getattr(st, "swing_execution_tf", "H1")
+            candle_time = None
+            if custom_timeframe_dfs and exec_tf in custom_timeframe_dfs:
+                c_df = custom_timeframe_dfs[exec_tf]
+                if len(c_df) >= 2:
+                    candle_time = c_df.iloc[-2]["time"]
+            elif packet and hasattr(packet, "timestamp_utc"):
+                candle_time = packet.timestamp_utc
+
+            if not bypass_circuit_breaker:
+                gate_ok, gate_msg = self._check_candle_close_gate(symbol, check_mode, exec_tf, candle_time)
+                if not gate_ok:
+                    if symbol in self.pair_schedules:
+                        self.pair_schedules[symbol]["last_scan_ist"] = to_ist_str(now)
+                        self.pair_schedules[symbol]["last_decision"] = "SKIP_CANDLE_ALREADY_SCANNED"
+                        self.pair_schedules[symbol]["status"] = "WAITING_CANDLE"
+                    logger.debug(f"Skipping scan for {symbol}: {gate_msg}")
+                    return None
+
+            if candle_time is not None:
+                self._last_scanned_candle_time[(symbol.rstrip("#").upper(), check_mode.upper(), exec_tf.upper())] = candle_time
+
+            # Release DB connection before async network calls (Gemini AI inference)
+            if close_db and db:
+                db.close()
+                db = None
+
+            # 6. Analyze with GeminiSupervisor
             report = await gemini_supervisor.analyze_pair(
                 packet=packet,
                 account_type=active_account,
-                db=db,
+                db=None,
             )
 
             # Update in-memory schedule tracker
@@ -348,6 +803,10 @@ class LiveIntervalScheduler:
             # 3. Route according to Execution Mode
             if exec_mode == "HALTED" or report.decision == "WAIT":
                 return report
+
+            # Re-acquire DB connection for post-analysis routing
+            if close_db and db is None:
+                db = self._get_db()
 
             if exec_mode == "MONITOR":
                 logger.info(f"MONITOR Mode: Recorded analysis report #{report.id} for {symbol}. No broker orders.")
@@ -369,6 +828,63 @@ class LiveIntervalScheduler:
                 direction = "BUY" if sl < entry else "SELL"
 
                 risk_pct = float(pair.risk_pct_scalp if mode == "SCALP" else pair.risk_pct_swing)
+
+                # Re-verify strict 1-position lock right before execution
+                lock_ok, lock_msg = self._check_symbol_open_position_lock(symbol, db)
+                if not lock_ok:
+                    logger.warning(f"Final pre-execution lock rejected setup on {symbol}: {lock_msg}")
+                    r = db.query(GeminiAnalysisReport).filter_by(id=report.id).first()
+                    if r:
+                        r.execution_status = "POSITION_ALREADY_OPEN"
+                        r.thesis_text = f"Rejected: {lock_msg}"
+                        db.commit()
+                    return report
+
+                # Correlation Group & Portfolio Cap Check
+                cap_ok, cap_msg = self._check_portfolio_and_correlation_caps(
+                    symbol=symbol,
+                    direction=direction,
+                    proposed_risk_pct=risk_pct,
+                    db=db,
+                )
+                if not cap_ok:
+                    logger.warning(f"Portfolio/Correlation cap rejected setup on {symbol}: {cap_msg}")
+                    r = db.query(GeminiAnalysisReport).filter_by(id=report.id).first()
+                    if r:
+                        r.execution_status = "CAP_REJECTED"
+                        r.thesis_text = f"Rejected: {cap_msg}"
+                        db.commit()
+                    return report
+
+                # Hard Pre-Order Math & Geometry Validation
+                digits = int(pair.digits) if pair and pair.digits else 2
+                spread_price = (packet.ask - packet.bid) if (packet and packet.ask > 0 and packet.bid > 0) else (packet.spread_points * (0.01 if digits == 2 else 0.0001))
+                atr14 = 0.0
+                if packet:
+                    m15 = packet.timeframe_breakdown.get("M15") if hasattr(packet, "timeframe_breakdown") else None
+                    if m15 and isinstance(m15, dict) and m15.get("atr14"):
+                        atr14 = float(m15["atr14"])
+                if atr14 <= 0:
+                    atr14 = 3.0 if "GOLD" in symbol.upper() else (300.0 if "BTC" in symbol.upper() else 0.0015)
+
+                geom_ok, geom_msg = risk_engine.validate_trade_geometry_and_rr(
+                    direction=direction,
+                    entry=entry,
+                    sl=sl,
+                    tp1=tp1,
+                    tp2=tp2,
+                    mode=mode,
+                    current_spread_price=spread_price,
+                    ltf_atr_14=atr14,
+                )
+                if not geom_ok:
+                    logger.warning(f"Geometry/RR gate rejected setup on {symbol}: {geom_msg}")
+                    r = db.query(GeminiAnalysisReport).filter_by(id=report.id).first()
+                    if r:
+                        r.execution_status = "GEOMETRY_REJECTED"
+                        r.thesis_text = f"Rejected: {geom_msg}"
+                        db.commit()
+                    return report
 
                 # Risk Engine Gating
                 ok, lots, risk_msg = risk_engine.calculate_lot_size(
@@ -433,7 +949,7 @@ class LiveIntervalScheduler:
 
             return report
         finally:
-            if close_db:
+            if close_db and db:
                 db.close()
 
     async def _stage_copilot_setup(
@@ -480,7 +996,7 @@ class LiveIntervalScheduler:
             db.add(trade)
             db.commit()
         finally:
-            if close_db:
+            if close_db and db:
                 db.close()
 
     async def _dispatch_auto_order(
@@ -509,6 +1025,19 @@ class LiveIntervalScheduler:
            hard SL, and dual TP.
         """
         logger.info(f"AUTO Mode: Processing {direction} order for {symbol} ({lots} lots)...")
+
+        # Resolve equity and risk_pct
+        equity = 1000.0
+        risk_pct = 0.50
+        if db:
+            prof = db.query(MT5AccountProfile).filter_by(account_type=account_type.upper()).first()
+            if prof and prof.last_equity > 0:
+                equity = float(prof.last_equity)
+            p_bot = db.query(TradingPairBot).filter(
+                (TradingPairBot.symbol == symbol) | (TradingPairBot.symbol == f"{symbol}#")
+            ).first()
+            if p_bot:
+                risk_pct = float(p_bot.risk_pct_scalp if mode == "SCALP" else p_bot.risk_pct_swing)
 
         ticket = 0
         fill_price = entry
@@ -579,25 +1108,40 @@ class LiveIntervalScheduler:
                 cur_tp = float(tp2)
 
                 if direction == "BUY":
-                    is_valid = (cur_sl < tick.bid) and (cur_tp == 0 or cur_tp > tick.ask)
-                    if not is_valid:
-                        sl_dist = abs(entry - float(sl)) if (entry > 0 and float(sl) > 0) else (p * 0.005)
-                        tp_dist = abs(float(tp2) - entry) if (entry > 0 and float(tp2) > 0) else (p * 0.015)
-                        cur_sl = round(tick.bid - sl_dist, digits)
-                        cur_tp = round(tick.ask + tp_dist, digits)
+                    if cur_sl >= tick.bid or (cur_tp > 0 and cur_tp <= tick.ask):
+                        return None, f"Order rejected: BUY prices invalid against live quote (Bid {tick.bid}, Ask {tick.ask}, SL {cur_sl}, TP {cur_tp})"
                 else:
-                    is_valid = (cur_sl > tick.ask) and (cur_tp == 0 or cur_tp < tick.bid)
-                    if not is_valid:
-                        sl_dist = abs(float(sl) - entry) if (entry > 0 and float(sl) > 0) else (p * 0.005)
-                        tp_dist = abs(entry - float(tp2)) if (entry > 0 and float(tp2) > 0) else (p * 0.015)
-                        cur_sl = round(tick.ask + sl_dist, digits)
-                        cur_tp = round(tick.bid - tp_dist, digits)
+                    if cur_sl <= tick.ask or (cur_tp > 0 and cur_tp >= tick.bid):
+                        return None, f"Order rejected: SELL prices invalid against live quote (Bid {tick.bid}, Ask {tick.ask}, SL {cur_sl}, TP {cur_tp})"
 
-                vol = float(lots)
-                if hasattr(info, "volume_min") and vol < info.volume_min:
-                    vol = info.volume_min
-                if hasattr(info, "volume_step") and info.volume_step > 0:
-                    vol = round(vol / info.volume_step) * info.volume_step
+                # Universal MT5 tick_value lot sizing & $50 dollar risk cap
+                tick_size = getattr(info, "trade_tick_size", 0.01)
+                tick_val = getattr(info, "trade_tick_value", 1.0)
+                vol_min = getattr(info, "volume_min", 0.01)
+                vol_max = getattr(info, "volume_max", 100.0)
+                vol_step = getattr(info, "volume_step", 0.01)
+
+                sl_dist = abs(entry - cur_sl)
+                ticks_at_risk = (sl_dist / tick_size) if tick_size > 0 else 1.0
+                loss_per_lot = ticks_at_risk * tick_val
+
+                cash_risk = min(float(equity) * (float(risk_pct) / 100.0), 50.0)
+
+                if loss_per_lot > 0:
+                    raw_lots = cash_risk / loss_per_lot
+                    step_dec = Decimal(str(vol_step))
+                    lots_dec = (Decimal(str(raw_lots)) // step_dec) * step_dec
+                    calc_lots = float(lots_dec)
+                    if calc_lots < vol_min:
+                        min_risk = loss_per_lot * vol_min
+                        if min_risk <= cash_risk * 1.5:
+                            vol = vol_min
+                        else:
+                            return None, f"Min lot {vol_min} risk (${min_risk:.2f}) exceeds 1.5x risk budget (${cash_risk:.2f})"
+                    else:
+                        vol = min(calc_lots, vol_max)
+                else:
+                    vol = vol_min
 
                 if is_limit_order:
                     # Place Pending Limit Order
@@ -696,7 +1240,7 @@ class LiveIntervalScheduler:
             db.commit()
             trade_id = trade.id
         finally:
-            if close_db:
+            if close_db and db:
                 db.close()
 
         # Broadcast WebSocket event
@@ -754,6 +1298,11 @@ class LiveIntervalScheduler:
                 return False, f"Staged setup #{trade_id} not found or already processed."
 
             sym = trade.symbol
+            # Check 1-position lock before approving copilot setup
+            lock_ok, lock_msg = self._check_symbol_open_position_lock(sym, db)
+            if not lock_ok:
+                return False, f"Copilot execution blocked: {lock_msg}"
+
             lots = float(trade.lots)
             direction = trade.direction
             planned_entry = float(trade.entry_price)
@@ -763,7 +1312,7 @@ class LiveIntervalScheduler:
             mode = trade.mode
             acc_type = trade.account_type
         finally:
-            if close_db:
+            if close_db and db:
                 db.close()
 
         ticket = 0
@@ -890,7 +1439,7 @@ class LiveIntervalScheduler:
                 t.opened_at_utc = now_utc()
                 db.commit()
         finally:
-            if close_db:
+            if close_db and db:
                 db.close()
 
         # Broadcast POSITION_OPENED to all UI clients via WebSocket
@@ -925,7 +1474,7 @@ class LiveIntervalScheduler:
             trade.status = "REJECTED"
             db.commit()
         finally:
-            if close_db:
+            if close_db and db:
                 db.close()
 
         return True, f"Dismissed Copilot setup #{trade_id}."
