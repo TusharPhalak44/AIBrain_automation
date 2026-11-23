@@ -42,6 +42,10 @@ class Settings(BaseSettings):
         description="Default MT5 executable path",
     )
 
+    # Telegram Alerting Fallbacks
+    TELEGRAM_BOT_TOKEN: str = Field(default="", description="Optional Telegram bot token fallback")
+    TELEGRAM_CHAT_ID: str = Field(default="", description="Optional Telegram chat ID fallback")
+
     # Recovery Spool
     MYSQL_SPOOL_PATH: Path = Field(
         default_factory=lambda: DATA_DIR / "mysql_recovery_spool.jsonl"

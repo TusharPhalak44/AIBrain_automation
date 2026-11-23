@@ -244,6 +244,11 @@ export const api = {
       request<any>(`/api/ai/pairs/${encodeURIComponent(symbol)}/toggle`, {
         method: "POST",
       }),
+    reconcileMT5: () =>
+      request<any>("/api/ai-brain/reconcile-mt5", {
+        method: "POST",
+      }),
+    getRiskGuardrails: () => request<any>("/api/ai-brain/risk-guardrails"),
   },
 
   strategies: {
@@ -325,6 +330,17 @@ export const api = {
         method: "POST",
       });
     },
+    getConfig: () => request<any>("/api/ai-brain/telegram/config"),
+    updateConfig: (payload: any) =>
+      request<any>("/api/ai-brain/telegram/config", {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+      }),
+    sendTestPreview: (payload: { template_type: string; symbol?: string; chat_id?: string }) =>
+      request<any>("/api/ai-brain/telegram/test", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      }),
   },
 
   reports: {

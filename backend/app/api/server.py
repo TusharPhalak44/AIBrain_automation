@@ -12,6 +12,7 @@ from backend.app.mt5_bridge.mt5_actor import mt5_actor
 from backend.app.mt5_bridge.deal_reconciler import deal_reconciler
 from backend.app.telegram_reports.telegram_bot import telegram_service
 from backend.app.ai_brain.scheduler import scheduler
+from backend.app.ai_brain.position_manager import position_manager
 from backend.app.api.routes import (
     health,
     settings as settings_route,
@@ -50,9 +51,20 @@ def create_app(enable_lifespan_tasks: bool = True) -> FastAPI:
             await mt5_actor.start()
             watchdog.start()
             deal_reconciler.start()
-            deal_reconciler.telegram_notifier = telegram_service.broadcast_trade_event
+            from backend.app.ai_brain.telegram_notifier import telegram_notifier
+            deal_reconciler.telegram_notifier = telegram_notifier.notify_trade_closed_from_deal
             telegram_service.start()
+            position_manager.start()
             await scheduler.start()
+
+            # Startup MT5 open trade reconciliation
+            try:
+                from backend.app.mt5_bridge.deal_reconciler import reconcile_open_trades_with_mt5
+                from backend.app.db.session import SessionLocal
+                with SessionLocal() as db_session:
+                    reconcile_open_trades_with_mt5(db_session)
+            except Exception as e:
+                logger.warning(f"Startup MT5 reconciliation skipped: {e}")
 
             # Auto-hydrate MT5 terminal connection from saved MySQL profile on boot
             try:
@@ -77,6 +89,7 @@ def create_app(enable_lifespan_tasks: bool = True) -> FastAPI:
         if enable_lifespan_tasks:
             logger.info("Shutting down background services...")
             await scheduler.stop()
+            position_manager.stop()
             telegram_service.stop()
             deal_reconciler.stop()
             watchdog.stop()

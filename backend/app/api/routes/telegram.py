@@ -93,27 +93,34 @@ def delete_recipient(recipient_id: int, db: Session = Depends(get_db)):
     return {"status": "SUCCESS", "message": f"Recipient #{recipient_id} deleted"}
 
 
+@router.get("/config")
+def get_telegram_config_route(db: Session = Depends(get_db)):
+    """Fetch current Telegram alert configuration and category toggle flags."""
+    from backend.app.api.routes.ai_brain import get_telegram_config
+    return get_telegram_config(db)
+
+
+@router.patch("/config")
+def update_telegram_config_route(payload: dict, db: Session = Depends(get_db)):
+    """Update Telegram bot credentials and alert category subscription toggles."""
+    from backend.app.api.routes.ai_brain import update_telegram_config, TelegramConfigUpdateSchema
+    schema = TelegramConfigUpdateSchema(**payload)
+    return update_telegram_config(schema, db)
+
+
 @router.post("/test")
-async def test_telegram_message(chat_id: Optional[str] = None, db: Session = Depends(get_db)):
-    """Dispatch a test message to verify Telegram bot connectivity."""
-    target_chat = chat_id
-    if not target_chat:
-        st = db.query(AppSettings).filter_by(id=1).first()
-        target_chat = st.telegram_admin_chat_id if st else None
-
-    if not target_chat:
-        raise HTTPException(status_code=400, detail="No target chat_id provided or configured as admin.")
-
-    text = (
-        f"🔔 <b>XM Global MT5 Portal Test Alert</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"Test message dispatched successfully.\n"
-        f"• <b>Timestamp:</b> {to_ist_str(now_utc())}\n"
-        f"• <b>Status:</b> All operational bridges normal."
+async def test_telegram_message(
+    chat_id: Optional[str] = None,
+    template_type: Optional[str] = None,
+    symbol: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """Dispatch a test message to verify Telegram bot connectivity (supports template_type preview)."""
+    from backend.app.api.routes.ai_brain import send_telegram_test_preview, TelegramTestSchema
+    schema = TelegramTestSchema(
+        template_type=template_type or "EXECUTION",
+        symbol=symbol or "GOLD#",
+        chat_id=chat_id,
     )
-    ok = await telegram_service.send_message(target_chat, text)
-    if not ok:
-        raise HTTPException(status_code=500, detail="Failed to send test message. Check bot token and chat ID.")
-
-    return {"status": "SUCCESS", "message": f"Test alert sent to chat {target_chat}"}
+    return await send_telegram_test_preview(schema, db)
 

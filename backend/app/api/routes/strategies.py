@@ -55,6 +55,9 @@ class BacktestRequestSchema(BaseModel):
 class AssignStrategySchema(BaseModel):
     scalp_strategy_id: Optional[int] = None
     swing_strategy_id: Optional[int] = None
+    mode: Optional[str] = None
+    planning_tf: Optional[str] = None
+    execution_tf: Optional[str] = None
 
 
 @router.get("")
@@ -355,12 +358,48 @@ def assign_strategy_to_pair(symbol: str, payload: AssignStrategySchema, db: Sess
         else:
             pair.swing_strategy_id = None
 
+    if payload.mode:
+        m = payload.mode.upper()
+        if m == "SCALP":
+            pair.scalp_enabled = True
+            pair.swing_enabled = False
+        elif m == "SWING":
+            pair.scalp_enabled = False
+            pair.swing_enabled = True
+        elif m in ("BOTH", "ALL"):
+            pair.scalp_enabled = True
+            pair.swing_enabled = True
+
+    from backend.app.db.models import AppSettings
+    from backend.app.ai_brain.scheduler import scheduler
+
+    st = db.query(AppSettings).filter_by(id=1).first()
+    if st:
+        if payload.planning_tf:
+            if pair.scalp_enabled:
+                st.scalp_planning_tf = payload.planning_tf
+            if pair.swing_enabled:
+                st.swing_planning_tf = payload.planning_tf
+        if payload.execution_tf:
+            if pair.scalp_enabled:
+                st.scalp_execution_tf = payload.execution_tf
+            if pair.swing_enabled:
+                st.swing_execution_tf = payload.execution_tf
+
     db.commit()
+
+    try:
+        scheduler._sync_pair_schedules(db)
+    except Exception:
+        pass
+
     return {
         "status": "SUCCESS",
         "symbol": pair.symbol,
         "scalp_strategy_id": pair.scalp_strategy_id,
         "swing_strategy_id": pair.swing_strategy_id,
+        "scalp_enabled": pair.scalp_enabled,
+        "swing_enabled": pair.swing_enabled,
         "message": f"Strategies assigned to {pair.symbol} successfully.",
     }
 

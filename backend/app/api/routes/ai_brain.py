@@ -315,7 +315,7 @@ async def get_upcoming_setups(db: Session = Depends(get_db)):
 async def trigger_manual_scan(symbol: str, db: Session = Depends(get_db)):
     """Trigger an immediate supervisory scan for a specific pair, bypassing countdown timer."""
     resolved = resolve_broker_symbol(symbol, db)
-    report = await scheduler.execute_pair_scan(resolved)
+    report = await scheduler.execute_pair_scan(resolved, db=db, bypass_circuit_breaker=True)
     if not report:
         raise HTTPException(
             status_code=404,
@@ -342,7 +342,7 @@ async def trigger_scan_all(db: Session = Depends(get_db)):
     results = []
 
     for p in pairs:
-        rep = await scheduler.execute_pair_scan(p.symbol)
+        rep = await scheduler.execute_pair_scan(p.symbol, db=db, bypass_circuit_breaker=True)
         if rep:
             results.append({
                 "symbol": rep.symbol,
@@ -882,6 +882,286 @@ def toggle_pair_enabled(symbol: str, db: Session = Depends(get_db)):
         "enabled": pb.enabled,
         "message": f"Pair {pb.symbol} scanner is now {'ENABLED' if pb.enabled else 'DISABLED'}.",
     }
+
+
+@router.post("/reconcile-mt5")
+@brain_router.post("/reconcile-mt5")
+def trigger_mt5_reconciliation(db: Session = Depends(get_db)):
+    """Manually trigger reconciliation of open trades in MySQL against live MT5 positions."""
+    from backend.app.mt5_bridge.deal_reconciler import reconcile_open_trades_with_mt5
+    res = reconcile_open_trades_with_mt5(db)
+    return res
+
+
+@router.get("/risk-guardrails")
+@brain_router.get("/risk-guardrails")
+def get_risk_guardrails(db: Session = Depends(get_db)):
+    """Fetch live risk guardrail metrics, portfolio limits, circuit breaker, and cooldown timers."""
+    return scheduler.get_guardrail_status(db)
+
+
+# ============================================================================
+# Telegram Notification Center & Template Testing
+# ============================================================================
+
+class TelegramConfigUpdateSchema(BaseModel):
+    enabled: Optional[bool] = None
+    bot_token: Optional[str] = None
+    bot_username: Optional[str] = None
+    admin_chat_id: Optional[str] = None
+    thread_id: Optional[str] = None
+    notify_pre_trigger: Optional[bool] = None
+    notify_executions: Optional[bool] = None
+    notify_be_and_partials: Optional[bool] = None
+    notify_closures: Optional[bool] = None
+    notify_system_alerts: Optional[bool] = None
+    silent_pre_trigger: Optional[bool] = None
+
+
+class TelegramTestSchema(BaseModel):
+    template_type: str = Field(default="EXECUTION", description="SETUP, EXECUTION, LIMIT, BE, TP1, CLOSE, GUARDRAIL")
+    symbol: Optional[str] = Field(default="GOLD#", description="Instrument symbol")
+    chat_id: Optional[str] = None
+
+
+@router.get("/telegram/config")
+@brain_router.get("/telegram/config")
+def get_telegram_config(db: Session = Depends(get_db)):
+    """Fetch current Telegram alert configuration and category toggle flags."""
+    from backend.app.core.crypto_vault import crypto_vault
+    from backend.app.core.config import settings
+
+    st = db.query(AppSettings).filter_by(id=1).first()
+    if not st:
+        raise HTTPException(status_code=404, detail="AppSettings not found")
+
+    token = ""
+    if st.telegram_bot_token_enc:
+        try:
+            token = crypto_vault.decrypt_secret(st.telegram_bot_token_enc) or ""
+        except Exception:
+            token = ""
+    if not token and settings.TELEGRAM_BOT_TOKEN:
+        token = settings.TELEGRAM_BOT_TOKEN
+
+    masked_token = ""
+    if token:
+        if len(token) > 10:
+            masked_token = f"{token[:6]}******{token[-4:]}"
+        else:
+            masked_token = "******"
+
+    admin_chat = st.telegram_admin_chat_id or settings.TELEGRAM_CHAT_ID or ""
+
+    return {
+        "enabled": bool(st.telegram_enabled),
+        "bot_token_masked": masked_token,
+        "bot_username": st.telegram_bot_username or "",
+        "admin_chat_id": admin_chat,
+        "thread_id": st.telegram_thread_id or "",
+        "notify_pre_trigger": bool(st.telegram_notify_pre_trigger),
+        "notify_executions": bool(st.telegram_notify_executions),
+        "notify_be_and_partials": bool(st.telegram_notify_be_and_partials),
+        "notify_closures": bool(st.telegram_notify_closures),
+        "notify_system_alerts": bool(st.telegram_notify_system_alerts),
+        "silent_pre_trigger": bool(st.telegram_silent_pre_trigger),
+        "is_configured": bool(token and admin_chat),
+    }
+
+
+@router.patch("/telegram/config")
+@brain_router.patch("/telegram/config")
+def update_telegram_config(payload: TelegramConfigUpdateSchema, db: Session = Depends(get_db)):
+    """Update Telegram bot credentials and alert category subscription toggles."""
+    from backend.app.core.crypto_vault import crypto_vault
+
+    st = db.query(AppSettings).filter_by(id=1).first()
+    if not st:
+        raise HTTPException(status_code=404, detail="AppSettings not found")
+
+    if payload.enabled is not None:
+        st.telegram_enabled = payload.enabled
+    if payload.bot_token is not None:
+        clean_token = payload.bot_token.strip()
+        if clean_token and not clean_token.startswith("***"):
+            st.telegram_bot_token_enc = crypto_vault.encrypt_secret(clean_token)
+    if payload.bot_username is not None:
+        st.telegram_bot_username = payload.bot_username.strip()
+    if payload.admin_chat_id is not None:
+        st.telegram_admin_chat_id = payload.admin_chat_id.strip()
+    if payload.thread_id is not None:
+        st.telegram_thread_id = payload.thread_id.strip() or None
+    if payload.notify_pre_trigger is not None:
+        st.telegram_notify_pre_trigger = payload.notify_pre_trigger
+    if payload.notify_executions is not None:
+        st.telegram_notify_executions = payload.notify_executions
+    if payload.notify_be_and_partials is not None:
+        st.telegram_notify_be_and_partials = payload.notify_be_and_partials
+    if payload.notify_closures is not None:
+        st.telegram_notify_closures = payload.notify_closures
+    if payload.notify_system_alerts is not None:
+        st.telegram_notify_system_alerts = payload.notify_system_alerts
+    if payload.silent_pre_trigger is not None:
+        st.telegram_silent_pre_trigger = payload.silent_pre_trigger
+
+    db.commit()
+    db.refresh(st)
+    return get_telegram_config(db)
+
+
+@router.post("/telegram/test")
+@brain_router.post("/telegram/test")
+async def send_telegram_test_preview(payload: TelegramTestSchema, db: Session = Depends(get_db)):
+    """Send live preview of an institutional HTML Telegram alert template."""
+    from backend.app.ai_brain.telegram_notifier import telegram_notifier
+
+    t_type = payload.template_type.upper()
+    sym = payload.symbol or "GOLD#"
+
+    cfg = telegram_notifier.get_config()
+    target_chat = payload.chat_id or cfg.get("chat_id")
+    if not cfg["bot_token"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Telegram Bot Token is not configured. Please save a valid bot token first.",
+        )
+    if not target_chat:
+        raise HTTPException(
+            status_code=400,
+            detail="Telegram Chat ID is not configured. Please save a chat ID or register as admin.",
+        )
+
+    # Temporarily override chat_id if provided specifically for test
+    if payload.chat_id:
+        cfg["chat_id"] = payload.chat_id
+
+    ok = False
+    try:
+        if t_type == "SETUP":
+            ok = await telegram_notifier.notify_pre_trigger_setup(
+                symbol=sym,
+                trade_style="SCALP",
+                direction="BUY",
+                trigger_zone_price=2645.50,
+                invalidation_price=2638.00,
+                trigger_condition="Asian Low Sweep & M5 Bullish FVG Inversion Close",
+                readiness_pct=85,
+                time_to_trigger_est="15-30m",
+                confluence_factors=[
+                    "HTF H4 Bullish Order Flow",
+                    "Session Low Liquidity Swept",
+                    "M5 Imbalance Mitigation in Progress",
+                    "Spread Healthy (11 pts)",
+                ],
+                thesis="Institutional liquidity grab below 2640. Expecting explosive expansion toward London High.",
+                silent=False,
+            )
+        elif t_type == "EXECUTION":
+            ok = await telegram_notifier.notify_trade_executed(
+                ticket=98124012,
+                symbol=sym,
+                mode="SCALP",
+                direction="BUY",
+                lots=0.15,
+                entry_price=2648.20,
+                sl=2642.50,
+                tp1=2656.75,
+                tp2=2668.50,
+                cash_risk=85.50,
+                risk_pct=0.50,
+                spread_points=12,
+                is_limit_order=False,
+                confidence=0.88,
+                gate_summary={
+                    "G1_htf_alignment": True,
+                    "G2_liquidity_sweep": True,
+                    "G3_fvg_confluence": True,
+                    "G4_risk_volatility": True,
+                    "G5_spread_session": True,
+                },
+                ai_summary="Displacement candle confirmed off H1 demand block. Risk strictly capped at 0.50%.",
+            )
+        elif t_type == "LIMIT":
+            ok = await telegram_notifier.notify_limit_filled_or_expired(
+                ticket=98124012,
+                symbol=sym,
+                direction="BUY",
+                action="FILLED",
+                fill_price=2645.50,
+                lots=0.15,
+                sl=2640.00,
+                tp1=2653.75,
+                tp2=2665.00,
+            )
+        elif t_type == "BE":
+            ok = await telegram_notifier.notify_breakeven_locked(
+                ticket=98124012,
+                symbol=sym,
+                direction="BUY",
+                entry_price=2648.20,
+                new_sl=2648.50,
+                current_r=1.05,
+                next_target=2656.75,
+            )
+        elif t_type == "TP1":
+            ok = await telegram_notifier.notify_partial_tp1(
+                ticket=98124012,
+                symbol=sym,
+                direction="BUY",
+                volume_closed=0.09,
+                remaining_volume=0.06,
+                realized_pnl=76.95,
+                trailed_sl=2648.50,
+                tp2=2668.50,
+                current_r=1.50,
+            )
+        elif t_type == "CLOSE":
+            ok = await telegram_notifier.notify_trade_closed(
+                ticket=98124012,
+                symbol=sym,
+                mode="SCALP",
+                direction="BUY",
+                entry_price=2648.20,
+                exit_price=2668.50,
+                gross_pnl=304.50,
+                commission=0.00,
+                swap=-2.15,
+                net_pnl=302.35,
+                r_multiple=3.54,
+                exit_reason="TP2_HIT",
+                hold_duration_str="1h 14m",
+                prior_partial_pnl=76.95,
+                today_scorecard={"wins": 4, "losses": 1, "net_pnl": 412.80, "open_positions": 2},
+            )
+        elif t_type == "GUARDRAIL":
+            ok = await telegram_notifier.notify_system_guardrail(
+                alert_type="CIRCUIT_BREAKER",
+                title="Daily Drawdown -3.00% Circuit Breaker Active",
+                details="Account daily drawdown touched -$312.40 (-3.12%). All autonomous scanning paused until 00:05 UTC next session.",
+                action_taken="Autonomous Order Entry HALTED",
+                severity="CRITICAL",
+            )
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown template_type: {t_type}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error sending test Telegram preview: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Telegram test failed: {str(e)}")
+
+    if not ok:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to deliver Telegram message. Check bot token, chat ID permissions, or network connectivity.",
+        )
+
+    return {
+        "status": "SUCCESS",
+        "template_type": t_type,
+        "symbol": sym,
+        "message": f"Successfully delivered institutional {t_type} alert preview to Telegram.",
+    }
+
 
 
 

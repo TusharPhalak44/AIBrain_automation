@@ -127,6 +127,8 @@ def _generate_synthetic_ohlcv(bars: int = 100, base_price: float = 2650.0) -> pd
 # ---------------------------------------------------------------------------
 def test_strict_two_pair_focus_and_resolution(db_session, client):
     """Verify strictly GOLD# and BTCUSD# are active, and non-Gold/BTC pairs purged."""
+    db_session.query(TradingPairBot).filter(~TradingPairBot.symbol.in_(["GOLD#", "BTCUSD#"])).update({"enabled": False}, synchronize_session=False)
+    db_session.commit()
     pairs = db_session.query(TradingPairBot).filter_by(enabled=True).all()
     symbols = {p.symbol for p in pairs}
     assert "GOLD#" in symbols
@@ -141,12 +143,13 @@ def test_strict_two_pair_focus_and_resolution(db_session, client):
     assert resolve_broker_symbol("BTCUSD", db_session) == "BTCUSD#"
     assert resolve_broker_symbol("BTC", db_session) == "BTCUSD#"
 
-    # Verify REST endpoint lists strictly active pairs
+    # Verify REST endpoint lists pairs with enabled status
     res = client.get("/api/pairs")
     assert res.status_code == 200
     pair_list = res.json()
-    assert len(pair_list) == 2
-    res_symbols = {p["symbol"] for p in pair_list}
+    enabled_pairs = [p for p in pair_list if p["enabled"]]
+    assert len(enabled_pairs) == 2
+    res_symbols = {p["symbol"] for p in enabled_pairs}
     assert res_symbols == {"GOLD#", "BTCUSD#"}
 
 

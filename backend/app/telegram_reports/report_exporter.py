@@ -14,8 +14,20 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from backend.app.core.clock_sync import to_ist_str, now_utc
 from backend.app.db.session import SessionLocal
 from backend.app.db.models import TradeLedger, TelegramRecipient
+from backend.app.ai_brain.instruments import INSTRUMENT_UNIVERSE
 
 logger = logging.getLogger(__name__)
+
+
+def _format_price_for_export(val: Any, symbol: str) -> str:
+    if val is None or str(val).strip() in ("", "0", "0.0", "None"):
+        return ""
+    try:
+        spec = INSTRUMENT_UNIVERSE.get(symbol) or INSTRUMENT_UNIVERSE.get(f"{symbol}#") or INSTRUMENT_UNIVERSE.get(symbol.rstrip("#"))
+        digits = spec.digits if spec else 2
+        return f"{float(val):.{digits}f}"
+    except Exception:
+        return str(val)
 
 
 class ReportExporter:
@@ -67,19 +79,20 @@ class ReportExporter:
         ])
 
         for t in trades:
+            sym = t.symbol or ""
             writer.writerow([
                 t.id,
                 t.account_type,
                 t.position_id,
-                t.symbol,
+                sym,
                 t.mode,
                 t.direction,
                 t.status,
                 float(t.lots),
-                float(t.entry_price),
-                float(t.exit_price) if t.exit_price else "",
-                float(t.sl),
-                float(t.tp1),
+                _format_price_for_export(t.entry_price, sym),
+                _format_price_for_export(t.exit_price, sym),
+                _format_price_for_export(t.sl, sym),
+                _format_price_for_export(t.tp1, sym),
                 float(t.gross_pnl),
                 float(t.commission),
                 float(t.swap),

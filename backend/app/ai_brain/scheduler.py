@@ -315,6 +315,19 @@ class LiveIntervalScheduler:
                             trade.status = "CANCELLED"
                             trade.exit_reason = "STRUCTURE_INVALIDATED_BEFORE_FILL"
                             db.commit()
+                            try:
+                                from backend.app.ai_brain.telegram_notifier import telegram_notifier
+                                asyncio.create_task(
+                                    telegram_notifier.notify_limit_filled_or_expired(
+                                        ticket=order_ticket,
+                                        symbol=sym,
+                                        direction=direction,
+                                        action="CANCELLED",
+                                        reason="Structure invalidated before fill (price reached SL)",
+                                    )
+                                )
+                            except Exception as te:
+                                logger.debug(f"Limit cancelled Telegram alert note: {te}")
                             continue
                     else:
                         # Order not in pending orders: check if it became an open position
@@ -338,11 +351,41 @@ class LiveIntervalScheduler:
                                 "sl": float(trade.sl),
                                 "tp2": float(trade.tp2),
                             })
+                            try:
+                                from backend.app.ai_brain.telegram_notifier import telegram_notifier
+                                asyncio.create_task(
+                                    telegram_notifier.notify_limit_filled_or_expired(
+                                        ticket=pos.ticket,
+                                        symbol=sym,
+                                        direction=trade.direction,
+                                        action="FILLED",
+                                        fill_price=float(pos.price_open),
+                                        lots=float(trade.lots),
+                                        sl=float(trade.sl),
+                                        tp1=float(trade.tp1 or 0.0),
+                                        tp2=float(trade.tp2 or 0.0),
+                                    )
+                                )
+                            except Exception as te:
+                                logger.debug(f"Limit filled Telegram alert note: {te}")
                         else:
                             # Not found in orders or positions: expired or canceled on terminal
                             trade.status = "CANCELLED"
                             trade.exit_reason = "EXPIRED_OR_CANCELLED"
                             db.commit()
+                            try:
+                                from backend.app.ai_brain.telegram_notifier import telegram_notifier
+                                asyncio.create_task(
+                                    telegram_notifier.notify_limit_filled_or_expired(
+                                        ticket=order_ticket,
+                                        symbol=sym,
+                                        direction=trade.direction,
+                                        action="EXPIRED",
+                                        reason="Expired or cancelled on MT5 terminal",
+                                    )
+                                )
+                            except Exception as te:
+                                logger.debug(f"Limit expired Telegram alert note: {te}")
                 except Exception as ex:
                     logger.debug(f"Error monitoring pending order #{trade.id}: {ex}")
         except Exception as e:
@@ -613,6 +656,20 @@ class LiveIntervalScheduler:
                 self.circuit_breaker_until_utc = today_start + timedelta(days=1, minutes=5)
                 self.circuit_breaker_reason = f"Daily drawdown {dd_pct:.2f}% breached -3.00% equity limit"
                 logger.critical(f"Daily Drawdown Circuit Breaker Tripped! {self.circuit_breaker_reason}")
+                try:
+                    from backend.app.ai_brain.telegram_notifier import telegram_notifier
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(
+                        telegram_notifier.notify_system_guardrail(
+                            alert_type="CIRCUIT_BREAKER",
+                            title="Daily Drawdown Circuit Breaker Tripped",
+                            details=self.circuit_breaker_reason,
+                            action_taken="Autonomous Order Entry Paused until 00:05 UTC next day",
+                            severity="CRITICAL",
+                        )
+                    )
+                except Exception as te:
+                    logger.debug(f"Circuit breaker Telegram alert note: {te}")
                 return False, f"CIRCUIT_BREAKER_TRIPPED: {self.circuit_breaker_reason}"
 
         # 4 consecutive SL_HIT check
@@ -633,6 +690,20 @@ class LiveIntervalScheduler:
             self.circuit_breaker_until_utc = today_start + timedelta(days=1, minutes=5)
             self.circuit_breaker_reason = f"4 consecutive SL_HIT trades today ({consecutive_sl} in a row)"
             logger.critical(f"Daily Drawdown Circuit Breaker Tripped! {self.circuit_breaker_reason}")
+            try:
+                from backend.app.ai_brain.telegram_notifier import telegram_notifier
+                loop = asyncio.get_running_loop()
+                loop.create_task(
+                    telegram_notifier.notify_system_guardrail(
+                        alert_type="CIRCUIT_BREAKER",
+                        title="4 Consecutive SL Hit Breaker Tripped",
+                        details=self.circuit_breaker_reason,
+                        action_taken="Autonomous Order Entry Paused until 00:05 UTC next day",
+                        severity="CRITICAL",
+                    )
+                )
+            except Exception as te:
+                logger.debug(f"Circuit breaker Telegram alert note: {te}")
             return False, f"CIRCUIT_BREAKER_TRIPPED: {self.circuit_breaker_reason}"
 
         return True, "OK"
@@ -793,6 +864,41 @@ class LiveIntervalScheduler:
                 account_type=active_account,
                 db=None,
             )
+
+            # Check for upcoming setup radar alert (Pre-Trigger Setup Radar)
+            if report and (report.upcoming_setup_json or getattr(report, "readiness_pct", 0) >= 60 or report.decision == "PRE_TRIGGER"):
+                try:
+                    import json
+                    from backend.app.ai_brain.telegram_notifier import telegram_notifier
+                    up = json.loads(report.upcoming_setup_json) if report.upcoming_setup_json else {}
+                    t_zone = float(up.get("trigger_zone_price") or report.entry_price or (packet.bid if packet else 0.0))
+                    inv_zone = float(up.get("invalidation_price") or report.stop_loss or (t_zone * 0.99))
+                    if t_zone > 0:
+                        t_cond = up.get("trigger_condition") or "Confluence zone tap & M5 FVG close"
+                        readiness = getattr(report, "readiness_pct", 0) or up.get("readiness_pct") or 75
+                        conf_factors = up.get("confluence_factors") or []
+                        t_style = up.get("setup_mode") or up.get("trade_style") or ("SCALP" if "SCALP" in report.decision else "SWING")
+                        dir_val = "BUY" if inv_zone < t_zone else "SELL"
+                        if up.get("watch_bias"):
+                            if "BULLISH" in up["watch_bias"]:
+                                dir_val = "BUY"
+                            elif "BEARISH" in up["watch_bias"]:
+                                dir_val = "SELL"
+                        asyncio.create_task(
+                            telegram_notifier.notify_pre_trigger_setup(
+                                symbol=symbol,
+                                trade_style=t_style,
+                                direction=dir_val,
+                                trigger_zone_price=t_zone,
+                                invalidation_price=inv_zone,
+                                trigger_condition=t_cond,
+                                readiness_pct=int(readiness),
+                                confluence_factors=conf_factors,
+                                thesis=report.thesis_text,
+                            )
+                        )
+                except Exception as te:
+                    logger.debug(f"Pre-trigger radar alert dispatch note for {symbol}: {te}")
 
             # Update in-memory schedule tracker
             if symbol in self.pair_schedules:
@@ -1271,19 +1377,35 @@ class LiveIntervalScheduler:
                 "tp2": final_tp,
             })
 
-        # Send Telegram Execution Alert
-        await telegram_service.broadcast_trade_event(
-            trade=None,
-            event_details={
-                "position_id": ticket,
-                "symbol": symbol,
-                "direction": direction,
-                "exit_price": fill_price,
-                "exit_reason": f"AUTO_ENTRY_{mode}",
-                "gross_pnl": 0.0,
-                "net_pnl": 0.0,
-            },
-        )
+        # Send Rich Institutional Telegram Execution Alert
+        try:
+            from backend.app.ai_brain.telegram_notifier import telegram_notifier
+            cash_r = float(equity * (risk_pct / 100.0))
+            conf_val = float(report.confidence) if (report and report.confidence is not None) else 0.85
+            ai_text = report.thesis_text if report else "Algorithmic confluence trigger verified."
+            spread_pts = packet.spread_points if packet else 12
+            asyncio.create_task(
+                telegram_notifier.notify_trade_executed(
+                    ticket=ticket,
+                    symbol=symbol,
+                    mode=mode,
+                    direction=direction,
+                    lots=lots,
+                    entry_price=fill_price,
+                    sl=final_sl,
+                    tp1=tp1,
+                    tp2=final_tp,
+                    cash_risk=cash_r,
+                    risk_pct=risk_pct,
+                    spread_points=spread_pts,
+                    is_limit_order=is_limit_order,
+                    order_type_str=f"{direction}_LIMIT" if is_limit_order else None,
+                    confidence=conf_val,
+                    ai_summary=ai_text,
+                )
+            )
+        except Exception as te:
+            logger.debug(f"Execution Telegram alert note: {te}")
 
     async def approve_copilot_setup(self, trade_id: int, db: Optional[Session] = None) -> Tuple[bool, str]:
         """User 1-click execution of a staged PLANNED setup."""
@@ -1457,6 +1579,32 @@ class LiveIntervalScheduler:
             })
         except Exception as e:
             logger.warning(f"Could not broadcast POSITION_OPENED: {e}")
+
+        # Send Telegram Execution Alert for Copilot Trade
+        try:
+            from backend.app.ai_brain.telegram_notifier import telegram_notifier
+            tp1_val = float(trade.tp1 or fill_price)
+            cash_r = float(lots * abs(fill_price - final_sl) * 100.0) if final_sl else 50.0
+            asyncio.create_task(
+                telegram_notifier.notify_trade_executed(
+                    ticket=ticket,
+                    symbol=sym,
+                    mode=trade.mode or "SWING",
+                    direction=direction,
+                    lots=lots,
+                    entry_price=fill_price,
+                    sl=final_sl,
+                    tp1=tp1_val,
+                    tp2=final_tp,
+                    cash_risk=cash_r,
+                    risk_pct=0.50,
+                    spread_points=12,
+                    confidence=0.90,
+                    ai_summary="Copilot manual execution confirmed by operator.",
+                )
+            )
+        except Exception as te:
+            logger.debug(f"Copilot Telegram alert note: {te}")
 
         return True, f"Successfully executed Copilot trade #{ticket} on {sym} ({lots} lots at {fill_price})."
 

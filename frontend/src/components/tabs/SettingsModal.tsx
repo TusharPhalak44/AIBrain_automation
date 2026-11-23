@@ -188,10 +188,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     try {
       const data = await api.accounts.getProfile(type);
       setLoginId(data.login_id ? String(data.login_id) : "");
-      setServerName(data.server_name || "XMGlobal-MT5 9");
+      setServerName(data.server_name || "XMGlobal-MT5 10");
       if (data.terminal_path) setTerminalPath(data.terminal_path);
       setHasStoredPassword(Boolean(data.has_password));
-      setPassword(data.has_password ? "••••••••" : "");
+      setPassword("");
     } catch (e: any) {
       console.error("Failed to load account profile:", e);
     }
@@ -219,12 +219,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         server_name: serverName.trim(),
         terminal_path: terminalPath.trim(),
       };
-      if (password && password !== "••••••••") {
+      if (password && password.trim() && password !== "••••••••") {
         payload.password = password.trim();
       }
 
       await api.accounts.saveProfile(accountType, payload);
-      toast.success("Profile Saved", `${accountType} credentials persisted to MySQL.`);
+      toast.success("Profile Saved", `${accountType} credentials (Login: ${loginId.trim()}) persisted to MySQL.`);
+      setPassword("");
       await loadAccount(accountType);
     } catch (e: any) {
       toast.error("Save Failed", e.message);
@@ -242,14 +243,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         server_name: serverName.trim(),
         terminal_path: terminalPath.trim(),
       };
-      if (password && password !== "••••••••") {
+      if (password && password.trim() && password !== "••••••••") {
         payload.password = password.trim();
       }
 
       const res = await api.accounts.connect(payload);
       toast.success("MT5 Connected", res.message || `Connected to ${accountType}.`);
+      setPassword("");
       await loadAccount(accountType);
     } catch (e: any) {
+      await loadAccount(accountType).catch(() => {});
       toast.error("MT5 Connection Failed", e.message);
     } finally {
       setIsConnecting(false);
@@ -481,13 +484,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     type={showPassword ? "text" : "password"}
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    placeholder={hasStoredPassword ? "•••••••• (Leave blank to keep existing)" : "Enter MT5 password"}
-                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-slate-100 pr-9"
+                    placeholder={hasStoredPassword ? "•••••••• (Password saved in AES-256 vault - enter only to change)" : "Enter MT5 password"}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-slate-100 pr-9 font-mono"
                   />
                   <button
                     type="button"
                     onClick={() => setShowPassword(!showPassword)}
                     className="absolute right-2.5 top-2 text-slate-400 hover:text-slate-200"
+                    title={showPassword ? "Hide password" : "Show password"}
                   >
                     {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
@@ -518,7 +522,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   onClick={handleSaveAccount}
                   className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold rounded-lg transition"
                 >
-                  {isSavingAccount ? "Saving..." : "Save Profile"}
+                  {isSavingAccount ? "Saving to MySQL..." : "Save Profile to MySQL"}
                 </button>
                 <button
                   disabled={isConnecting}
@@ -526,7 +530,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg shadow transition flex items-center gap-2"
                 >
                   <Radio className="w-4 h-4" />
-                  <span>{isConnecting ? "Connecting to MT5..." : "Connect & Sync MT5 Specs"}</span>
+                  <span>{isConnecting ? "Connecting to MT5..." : "Save & Connect MT5"}</span>
                 </button>
               </div>
             </div>

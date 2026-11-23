@@ -191,3 +191,4 @@ export const QuickSymbolSwitcher: React.FC<QuickSymbolSwitcherProps> = ({
     </div>
   );
 };
+

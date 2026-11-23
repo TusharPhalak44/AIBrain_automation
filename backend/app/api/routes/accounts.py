@@ -77,7 +77,10 @@ async def get_account_live_state():
 @router.get("/{account_type}")
 def get_profile(account_type: str, db: Session = Depends(get_db)):
     """Fetch details for a specific account profile (DEMO or LIVE)."""
-    p = db.query(MT5AccountProfile).filter_by(account_type=account_type.upper()).first()
+    acc_type = account_type.upper()
+    if acc_type not in ["DEMO", "LIVE"]:
+        raise HTTPException(status_code=400, detail=f"Invalid account type '{account_type}'. Must be 'DEMO' or 'LIVE'.")
+    p = db.query(MT5AccountProfile).filter_by(account_type=acc_type).first()
     if not p:
         raise HTTPException(status_code=404, detail=f"Profile '{account_type}' not found")
     return _serialize_profile(p)
@@ -215,11 +218,14 @@ async def switch_profile(payload: SwitchProfileSchema):
 @router.post("/{account_type}")
 def update_profile(account_type: str, payload: ProfileUpdateSchema, db: Session = Depends(get_db)):
     """Update profile details ensuring masked passwords do not overwrite encrypted storage."""
-    p = db.query(MT5AccountProfile).filter_by(account_type=account_type.upper()).first()
+    acc_type = account_type.upper()
+    if acc_type not in ["DEMO", "LIVE"]:
+        raise HTTPException(status_code=400, detail=f"Invalid account type '{account_type}'. Must be 'DEMO' or 'LIVE'.")
+    p = db.query(MT5AccountProfile).filter_by(account_type=acc_type).first()
     if not p:
         # Create profile row if missing
         p = MT5AccountProfile(
-            account_type=account_type.upper(),
+            account_type=acc_type,
             server_name="XMGlobal-MT5",
             terminal_path=r"C:\Program Files\XM Global MT5\terminal64.exe",
         )
@@ -230,7 +236,7 @@ def update_profile(account_type: str, payload: ProfileUpdateSchema, db: Session 
     serialized = _serialize_profile(p)
     return {
         "status": "SUCCESS",
-        "message": f"Profile {account_type.upper()} updated successfully",
+        "message": f"Profile {acc_type} updated successfully",
         "profile": serialized,
         **serialized,
     }

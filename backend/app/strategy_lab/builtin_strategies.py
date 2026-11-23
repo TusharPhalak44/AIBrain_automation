@@ -13,8 +13,8 @@ STRATEGY_LIQUIDITY_SWEEP_FVG = '''DEFAULT_PARAMS = {
     "sweep_lookback": 20,
     "atr_period": 14,
     "atr_sl_mult": 1.2,
-    "rr_tp1": 1.5,
-    "rr_tp2": 3.0,
+    "rr_tp1": 2.0,
+    "rr_tp2": 3.5,
 }
 
 def evaluate(df, params):
@@ -46,15 +46,17 @@ def evaluate(df, params):
     has_bear_fvg = bool(fvg["fvg_bearish"].iloc[-1] or fvg["fvg_bearish"].iloc[-2])
 
     sl_buffer = current_atr * params.get("atr_sl_mult", 1.2)
+    rr_tp1 = max(2.0, float(params.get("rr_tp1", 2.0)))
+    rr_tp2 = max(3.5, float(params.get("rr_tp2", 3.5)))
 
     # Bullish Setup: Sell-side liquidity sweep + Bullish reversal/FVG
     if recent_sweep == 1 and (has_bull_fvg or current_close > float(df["open"].iloc[-1])):
         entry = current_close
-        sl = round(current_low - sl_buffer, 2)
+        sl = round(current_low - sl_buffer, 5)
         risk = entry - sl
         if risk > 0:
-            tp1 = round(entry + (risk * params.get("rr_tp1", 1.5)), 2)
-            tp2 = round(entry + (risk * params.get("rr_tp2", 3.0)), 2)
+            tp1 = round(entry + (risk * rr_tp1), 5)
+            tp2 = round(entry + (risk * rr_tp2), 5)
             return {
                 "signal": "BUY",
                 "mode": "SCALP",
@@ -68,11 +70,11 @@ def evaluate(df, params):
     # Bearish Setup: Buy-side liquidity sweep + Bearish reversal/FVG
     elif recent_sweep == -1 and (has_bear_fvg or current_close < float(df["open"].iloc[-1])):
         entry = current_close
-        sl = round(current_high + sl_buffer, 2)
+        sl = round(current_high + sl_buffer, 5)
         risk = sl - entry
         if risk > 0:
-            tp1 = round(entry - (risk * params.get("rr_tp1", 1.5)), 2)
-            tp2 = round(entry - (risk * params.get("rr_tp2", 3.0)), 2)
+            tp1 = round(entry - (risk * rr_tp1), 5)
+            tp2 = round(entry - (risk * rr_tp2), 5)
             return {
                 "signal": "SELL",
                 "mode": "SCALP",
@@ -90,8 +92,8 @@ def evaluate(df, params):
 STRATEGY_SESSION_BREAKOUT = '''DEFAULT_PARAMS = {
     "session_range_bars": 12,
     "atr_period": 14,
-    "rr_tp1": 1.5,
-    "rr_tp2": 2.5,
+    "rr_tp1": 2.0,
+    "rr_tp2": 3.0,
 }
 
 def evaluate(df, params):
@@ -115,15 +117,17 @@ def evaluate(df, params):
 
     atr_vals = atr(df, period=params.get("atr_period", 14))
     current_atr = float(atr_vals.iloc[-1])
+    rr_tp1 = max(2.0, float(params.get("rr_tp1", 2.0)))
+    rr_tp2 = max(3.0, float(params.get("rr_tp2", 3.0)))
 
     # Bullish Breakout above range high
     if prev_close <= range_high and current_close > range_high:
         entry = current_close
-        sl = round(range_mid, 2)
+        sl = round(range_mid, 5)
         risk = entry - sl
         if risk > current_atr * 0.5:
-            tp1 = round(entry + (risk * params.get("rr_tp1", 1.5)), 2)
-            tp2 = round(entry + (risk * params.get("rr_tp2", 2.5)), 2)
+            tp1 = round(entry + (risk * rr_tp1), 5)
+            tp2 = round(entry + (risk * rr_tp2), 5)
             return {
                 "signal": "BUY",
                 "mode": "SCALP",
@@ -137,11 +141,11 @@ def evaluate(df, params):
     # Bearish Breakout below range low
     elif prev_close >= range_low and current_close < range_low:
         entry = current_close
-        sl = round(range_mid, 2)
+        sl = round(range_mid, 5)
         risk = sl - entry
         if risk > current_atr * 0.5:
-            tp1 = round(entry - (risk * params.get("rr_tp1", 1.5)), 2)
-            tp2 = round(entry - (risk * params.get("rr_tp2", 2.5)), 2)
+            tp1 = round(entry - (risk * rr_tp1), 5)
+            tp2 = round(entry - (risk * rr_tp2), 5)
             return {
                 "signal": "SELL",
                 "mode": "SCALP",
@@ -161,8 +165,8 @@ STRATEGY_EMA_TREND_PULLBACK = '''DEFAULT_PARAMS = {
     "slow_ema": 50,
     "atr_period": 14,
     "atr_sl_mult": 1.5,
-    "rr_tp1": 1.5,
-    "rr_tp2": 3.0,
+    "rr_tp1": 2.8,
+    "rr_tp2": 4.5,
 }
 
 def evaluate(df, params):
@@ -187,15 +191,17 @@ def evaluate(df, params):
     curr_atr = float(atr_vals.iloc[-1])
 
     sl_dist = curr_atr * params.get("atr_sl_mult", 1.5)
+    rr_tp1 = max(2.8, float(params.get("rr_tp1", 2.8)))
+    rr_tp2 = max(4.5, float(params.get("rr_tp2", 4.5)))
 
     # Uptrend Condition: Fast EMA > Slow EMA and price pulled back to Fast EMA
     if curr_fast > curr_slow and curr_low <= curr_fast and curr_close > curr_fast:
         entry = curr_close
-        sl = round(curr_low - sl_dist, 2)
+        sl = round(curr_low - sl_dist, 5)
         risk = entry - sl
         if risk > 0:
-            tp1 = round(entry + (risk * params.get("rr_tp1", 1.5)), 2)
-            tp2 = round(entry + (risk * params.get("rr_tp2", 3.0)), 2)
+            tp1 = round(entry + (risk * rr_tp1), 5)
+            tp2 = round(entry + (risk * rr_tp2), 5)
             return {
                 "signal": "BUY",
                 "mode": "SWING",
@@ -209,11 +215,11 @@ def evaluate(df, params):
     # Downtrend Condition: Fast EMA < Slow EMA and price pulled back to Fast EMA
     elif curr_fast < curr_slow and curr_high >= curr_fast and curr_close < curr_fast:
         entry = curr_close
-        sl = round(curr_high + sl_dist, 2)
+        sl = round(curr_high + sl_dist, 5)
         risk = sl - entry
         if risk > 0:
-            tp1 = round(entry - (risk * params.get("rr_tp1", 1.5)), 2)
-            tp2 = round(entry - (risk * params.get("rr_tp2", 3.0)), 2)
+            tp1 = round(entry - (risk * rr_tp1), 5)
+            tp2 = round(entry - (risk * rr_tp2), 5)
             return {
                 "signal": "SELL",
                 "mode": "SWING",
@@ -233,8 +239,8 @@ STRATEGY_CRYPTO_VOLATILITY_SQUEEZE = '''DEFAULT_PARAMS = {
     "bollinger_std": 2.0,
     "rsi_period": 14,
     "atr_period": 14,
-    "rr_tp1": 1.5,
-    "rr_tp2": 3.0,
+    "rr_tp1": 2.0,
+    "rr_tp2": 3.5,
 }
 
 def evaluate(df, params):
@@ -266,14 +272,17 @@ def evaluate(df, params):
     prev_upper = float(upper_band.iloc[-2])
     prev_lower = float(lower_band.iloc[-2])
 
+    rr_tp1_mult = max(2.0, float(params.get("rr_tp1", 2.0)))
+    rr_tp2_mult = max(3.5, float(params.get("rr_tp2", 3.5)))
+
     # Bullish Volatility Expansion
     if prev_close <= prev_upper and curr_close > curr_upper and curr_rsi > 55.0:
         entry = curr_close
-        sl = round(curr_close - (1.5 * curr_atr), 2)
+        sl = round(curr_close - (1.5 * curr_atr), 5)
         risk = entry - sl
         if risk > 0:
-            tp1 = round(entry + (risk * params.get("rr_tp1", 1.5)), 2)
-            tp2 = round(entry + (risk * params.get("rr_tp2", 3.0)), 2)
+            tp1 = round(entry + (risk * rr_tp1_mult), 5)
+            tp2 = round(entry + (risk * rr_tp2_mult), 5)
             return {
                 "signal": "BUY",
                 "mode": "SWING",
@@ -287,11 +296,11 @@ def evaluate(df, params):
     # Bearish Volatility Expansion
     elif prev_close >= prev_lower and curr_close < curr_lower and curr_rsi < 45.0:
         entry = curr_close
-        sl = round(curr_close + (1.5 * curr_atr), 2)
+        sl = round(curr_close + (1.5 * curr_atr), 5)
         risk = sl - entry
         if risk > 0:
-            tp1 = round(entry - (risk * params.get("rr_tp1", 1.5)), 2)
-            tp2 = round(entry - (risk * params.get("rr_tp2", 3.0)), 2)
+            tp1 = round(entry - (risk * rr_tp1_mult), 5)
+            tp2 = round(entry - (risk * rr_tp2_mult), 5)
             return {
                 "signal": "SELL",
                 "mode": "SWING",
@@ -312,7 +321,7 @@ BUILTIN_STRATEGIES: List[Dict[str, Any]] = [
         "description": "Exploits institutional liquidity sweeps past key range highs/lows with 3-candle Fair Value Gap imbalance entries.",
         "target_mode": "SCALP",
         "python_code": STRATEGY_LIQUIDITY_SWEEP_FVG,
-        "default_params_json": '{"sweep_lookback": 20, "atr_period": 14, "atr_sl_mult": 1.2, "rr_tp1": 1.5, "rr_tp2": 3.0}',
+        "default_params_json": '{"sweep_lookback": 20, "atr_period": 14, "atr_sl_mult": 1.2, "rr_tp1": 2.0, "rr_tp2": 3.5}',
         "is_builtin": True,
     },
     {
@@ -320,7 +329,7 @@ BUILTIN_STRATEGIES: List[Dict[str, Any]] = [
         "description": "Momentum expansion strategy capturing session open breakouts of pre-session consolidation ranges.",
         "target_mode": "SCALP",
         "python_code": STRATEGY_SESSION_BREAKOUT,
-        "default_params_json": '{"session_range_bars": 12, "atr_period": 14, "rr_tp1": 1.5, "rr_tp2": 2.5}',
+        "default_params_json": '{"session_range_bars": 12, "atr_period": 14, "rr_tp1": 2.0, "rr_tp2": 3.0}',
         "is_builtin": True,
     },
     {
@@ -328,7 +337,7 @@ BUILTIN_STRATEGIES: List[Dict[str, Any]] = [
         "description": "Higher-timeframe swing trend continuation strategy trading EMA21/50 dynamic value zone rejections.",
         "target_mode": "SWING",
         "python_code": STRATEGY_EMA_TREND_PULLBACK,
-        "default_params_json": '{"fast_ema": 21, "slow_ema": 50, "atr_period": 14, "atr_sl_mult": 1.5, "rr_tp1": 1.5, "rr_tp2": 3.0}',
+        "default_params_json": '{"fast_ema": 21, "slow_ema": 50, "atr_period": 14, "atr_sl_mult": 1.5, "rr_tp1": 2.8, "rr_tp2": 4.5}',
         "is_builtin": True,
     },
     {
@@ -336,14 +345,14 @@ BUILTIN_STRATEGIES: List[Dict[str, Any]] = [
         "description": "Tailored for 24/7 Crypto CFDs (BTC, ETH, SOL) identifying explosive volatility breakouts from Bollinger compression squeezes.",
         "target_mode": "BOTH",
         "python_code": STRATEGY_CRYPTO_VOLATILITY_SQUEEZE,
-        "default_params_json": '{"bollinger_period": 20, "bollinger_std": 2.0, "rsi_period": 14, "atr_period": 14, "rr_tp1": 1.5, "rr_tp2": 3.0}',
+        "default_params_json": '{"bollinger_period": 20, "bollinger_std": 2.0, "rsi_period": 14, "atr_period": 14, "rr_tp1": 2.8, "rr_tp2": 4.5}',
         "is_builtin": True,
     },
 ]
 
 
 def seed_builtin_strategies(session) -> int:
-    """Seed the 4 built-in starter strategies into StrategyScript table if missing."""
+    """Seed the 4 built-in starter strategies into StrategyScript table if missing, or update them."""
     from backend.app.db.models import StrategyScript
     from backend.app.core.clock_sync import now_utc
 
@@ -361,6 +370,12 @@ def seed_builtin_strategies(session) -> int:
                 created_at_utc=now_utc(),
             )
             session.add(script)
+            seeded_count += 1
+        else:
+            existing.python_code = strat["python_code"]
+            existing.default_params_json = strat["default_params_json"]
+            existing.target_mode = strat["target_mode"]
+            seeded_count += 1
             seeded_count += 1
 
     if seeded_count > 0:

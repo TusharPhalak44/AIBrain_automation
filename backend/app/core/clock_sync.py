@@ -39,20 +39,48 @@ def to_ist_str(utc_dt: Optional[datetime], fmt: str = "%d %b %Y, %I:%M:%S %p IST
     return ist_dt.strftime(fmt)
 
 
-def compute_broker_offset_sec(tick_time_epoch: int, system_utc_epoch: Optional[int] = None) -> int:
+def compute_broker_offset_sec(tick_time_epoch: Optional[int] = None, system_utc_epoch: Optional[int] = None) -> int:
     """
     Compute dynamic broker server UTC offset from live tick timestamp vs system UTC.
     XM MT5 typically runs on Cyprus/Eastern European time:
     - Winter: GMT+2 (7200 sec)
     - Summer: GMT+3 (10800 sec)
     """
+    if tick_time_epoch is None:
+        try:
+            import MetaTrader5 as mt5
+            if mt5.terminal_info():
+                for s in ["EURUSD#", "EURUSD", "GOLD#", "GOLD", "OILCash#", "OILCash", "BTCUSD#"]:
+                    t = mt5.symbol_info_tick(s)
+                    if t and t.time:
+                        tick_time_epoch = t.time
+                        break
+        except Exception:
+            pass
+
+    if tick_time_epoch is None:
+        return settings.BROKER_TZ_OFFSET_SEC
+
     if system_utc_epoch is None:
         system_utc_epoch = int(now_utc().timestamp())
 
     raw_diff = tick_time_epoch - system_utc_epoch
-    # Snap to nearest 3600-second boundary within [-43200, +43200]
-    snapped_hours = round(raw_diff / 3600.0)
-    return int(snapped_hours * 3600)
+    # Snap to nearest 1800-second boundary within [-43200, +43200]
+    snapped = round(raw_diff / 1800.0) * 1800
+    return int(snapped)
+
+
+def broker_epoch_to_utc(broker_epoch: int, offset_sec: Optional[int] = None) -> datetime:
+    """
+    Convert broker local server epoch timestamp to timezone-aware UTC datetime.
+    Ensures MT5 deal/position timestamps do not get inflated by broker offset (+2h / +3h).
+    """
+    sec = offset_sec if offset_sec is not None else compute_broker_offset_sec()
+    utc_epoch = broker_epoch - sec
+    cur_epoch = int(now_utc().timestamp())
+    if utc_epoch > cur_epoch + 60:
+        utc_epoch = cur_epoch
+    return datetime.fromtimestamp(utc_epoch, tz=timezone.utc)
 
 
 def get_broker_time(utc_dt: Optional[datetime] = None, offset_sec: Optional[int] = None) -> datetime:

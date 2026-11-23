@@ -107,6 +107,13 @@ def init_db(bind_engine=None) -> None:
                 ("cache_daily_purge_hour_utc", "INT DEFAULT 0"),
                 ("cache_daily_purge_minute_utc", "INT DEFAULT 5"),
                 ("cache_last_cleared_at_utc", "DATETIME NULL"),
+                ("telegram_thread_id", "VARCHAR(64) NULL"),
+                ("telegram_notify_pre_trigger", "BOOLEAN DEFAULT TRUE"),
+                ("telegram_notify_executions", "BOOLEAN DEFAULT TRUE"),
+                ("telegram_notify_be_and_partials", "BOOLEAN DEFAULT TRUE"),
+                ("telegram_notify_closures", "BOOLEAN DEFAULT TRUE"),
+                ("telegram_notify_system_alerts", "BOOLEAN DEFAULT TRUE"),
+                ("telegram_silent_pre_trigger", "BOOLEAN DEFAULT TRUE"),
             ]:
                 try:
                     conn.execute(text(f"ALTER TABLE app_settings ADD COLUMN {col} {col_type};"))

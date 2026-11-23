@@ -15,8 +15,9 @@ from backend.app.core.instruments import (
     get_symbol_spec,
 )
 from backend.app.core.symbol_utils import resolve_broker_symbol
-from backend.app.db.models import TradingPairBot
+from backend.app.db.models import TradingPairBot, AppSettings
 from backend.app.db.session import get_db
+from backend.app.ai_brain.scheduler import scheduler
 
 router = APIRouter(prefix="/pairs", tags=["Trading Pairs"])
 instruments_router = APIRouter(prefix="/instruments", tags=["Instruments"])
@@ -221,11 +222,14 @@ def update_pair(symbol: str, payload: PairUpdateSchema, db: Session = Depends(ge
 class AssignStrategySchema(BaseModel):
     scalp_strategy_id: Optional[int] = None
     swing_strategy_id: Optional[int] = None
+    mode: Optional[str] = None
+    planning_tf: Optional[str] = None
+    execution_tf: Optional[str] = None
 
 
 @router.post("/{symbol}/assign-strategy")
 def assign_strategy(symbol: str, payload: AssignStrategySchema, db: Session = Depends(get_db)):
-    """Assign scalp_strategy_id and/or swing_strategy_id to a TradingPairBot in MySQL."""
+    """Assign scalp_strategy_id, swing_strategy_id, mode, and timeframes to a TradingPairBot in MySQL."""
     resolved = resolve_broker_symbol(symbol, db)
     pair = db.query(TradingPairBot).filter_by(symbol=resolved).first()
     if not pair:
@@ -240,11 +244,46 @@ def assign_strategy(symbol: str, payload: AssignStrategySchema, db: Session = De
     if payload.swing_strategy_id is not None:
         pair.swing_strategy_id = payload.swing_strategy_id if payload.swing_strategy_id > 0 else None
 
+    if payload.mode:
+        m = payload.mode.upper()
+        if m == "SCALP":
+            pair.scalp_enabled = True
+            pair.swing_enabled = False
+        elif m == "SWING":
+            pair.scalp_enabled = False
+            pair.swing_enabled = True
+        elif m in ("BOTH", "ALL"):
+            pair.scalp_enabled = True
+            pair.swing_enabled = True
+
+    # Persist planning_tf and execution_tf into AppSettings
+    st = db.query(AppSettings).filter_by(id=1).first()
+    if st:
+        if payload.planning_tf:
+            if pair.scalp_enabled:
+                st.scalp_planning_tf = payload.planning_tf
+            if pair.swing_enabled:
+                st.swing_planning_tf = payload.planning_tf
+        if payload.execution_tf:
+            if pair.scalp_enabled:
+                st.scalp_execution_tf = payload.execution_tf
+            if pair.swing_enabled:
+                st.swing_execution_tf = payload.execution_tf
+
     db.commit()
+
+    # Synchronize scheduler state
+    try:
+        scheduler._sync_pair_schedules(db)
+    except Exception as e:
+        pass
+
     return {
         "status": "SUCCESS",
         "symbol": pair.symbol,
         "scalp_strategy_id": pair.scalp_strategy_id,
         "swing_strategy_id": pair.swing_strategy_id,
-        "message": f"Strategies assigned to {pair.symbol} successfully.",
+        "scalp_enabled": pair.scalp_enabled,
+        "swing_enabled": pair.swing_enabled,
+        "message": f"Strategies and parameters assigned to {pair.symbol} successfully.",
     }

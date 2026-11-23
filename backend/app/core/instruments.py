@@ -545,3 +545,4 @@ def get_instruments_by_asset_class(asset_class: str) -> List[InstrumentSpec]:
     """Return all instruments belonging to the given asset class (FOREX, COMMODITIES, CRYPTO)."""
     norm = asset_class.upper()
     return [spec for spec in INSTRUMENT_UNIVERSE.values() if spec.asset_class == norm]
+

@@ -38,3 +38,17 @@ def db_session(test_engine):
 def temp_spool_file(tmp_path):
     """Provide an isolated temporary spool file path."""
     return tmp_path / "test_mysql_recovery_spool.jsonl"
+
+
+@pytest.fixture(autouse=True)
+def reset_scheduler_state():
+    """Ensure singleton scheduler state does not leak between tests."""
+    from backend.app.ai_brain.scheduler import scheduler
+    scheduler.circuit_breaker_tripped = False
+    scheduler.circuit_breaker_until_utc = None
+    scheduler.circuit_breaker_reason = None
+    yield
+    scheduler.circuit_breaker_tripped = False
+    scheduler.circuit_breaker_until_utc = None
+    scheduler.circuit_breaker_reason = None
+

@@ -151,3 +151,4 @@ def test_manual_order_execution_validation(client):
     )
     assert res.status_code == 400
     assert "MANDATORY_SL_REQUIRED" in res.text or "greater than 0" in res.text
+

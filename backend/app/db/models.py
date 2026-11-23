@@ -63,6 +63,13 @@ class AppSettings(Base):
     telegram_bot_token_enc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     telegram_bot_username: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     telegram_admin_chat_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    telegram_thread_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    telegram_notify_pre_trigger: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    telegram_notify_executions: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    telegram_notify_be_and_partials: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    telegram_notify_closures: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    telegram_notify_system_alerts: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    telegram_silent_pre_trigger: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     # Timezones
     display_timezone: Mapped[str] = mapped_column(

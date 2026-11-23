@@ -28,11 +28,12 @@ class RiskEngine:
         volume_min: float = 0.01,
         volume_max: float = 100.0,
         volume_step: float = 0.01,
+        max_dollar_risk: Optional[float] = 50.0,
     ) -> Tuple[bool, float, str]:
         """
         Calculate dynamically sized lots based on cash at risk and stop distance.
         Formula:
-            CashRisk = Equity * (RiskPct / 100)
+            CashRisk = Equity * (RiskPct / 100) (capped at max_dollar_risk)
             StopDistance = abs(Entry - SL)
             TicksAtRisk = StopDistance / TickSize
             TickValueTotal = TicksAtRisk * TickValue
@@ -52,6 +53,9 @@ class RiskEngine:
             return False, 0.0, "Invalid tick size or tick value."
 
         cash_risk = equity * (risk_pct / 100.0)
+        if max_dollar_risk and max_dollar_risk > 0:
+            cash_risk = min(cash_risk, max_dollar_risk)
+
         ticks_at_risk = stop_distance / tick_size
         cost_per_lot_risk = ticks_at_risk * tick_value
 
@@ -155,6 +159,72 @@ class RiskEngine:
 
         if direction.upper() in ("SELL", "SHORT") and sl_price <= entry_price:
             return False, "INVALID_SL_SELL: Sell SL must be above entry price."
+
+        return True, "OK"
+
+    @staticmethod
+    def validate_trade_geometry_and_rr(
+        direction: str,
+        entry: float,
+        sl: float,
+        tp1: float,
+        tp2: float,
+        mode: str,
+        current_spread_price: float,
+        ltf_atr_14: float,
+    ) -> Tuple[bool, str]:
+        """
+        Hard Pre-Order Math & Geometry Validation:
+        1. Directional sanity:
+           BUY: sl < entry < tp1
+           SELL: tp1 < entry < sl
+        2. Minimum structural SL distance:
+           abs(entry - sl) >= 1.2 * ltf_atr_14
+        3. Spread friction check:
+           spread / abs(entry - sl) <= 0.15 for SCALP, <= 0.06 for SWING
+        4. Hard Net R:R Floor (after spread deduction):
+           SCALP: (abs(tp1 - entry) - spread) / abs(entry - sl) >= 1.8
+           SWING: (abs(tp1 - entry) - spread) / abs(entry - sl) >= 2.5
+        """
+        if entry <= 0 or sl <= 0 or tp1 <= 0:
+            return False, "Invalid price: entry, SL, and TP1 must be > 0"
+
+        sl_dist = abs(entry - sl)
+        if sl_dist <= 0:
+            return False, "Zero SL distance"
+
+        # 1. Directional Sanity
+        if direction.upper() in ("BUY", "LONG"):
+            if not (sl < entry < tp1):
+                return False, f"Invalid BUY geometry: require sl ({sl}) < entry ({entry}) < tp1 ({tp1})"
+            if tp2 > 0 and tp2 < tp1:
+                return False, f"Invalid BUY geometry: require tp1 ({tp1}) <= tp2 ({tp2})"
+        else:
+            if not (tp1 < entry < sl):
+                return False, f"Invalid SELL geometry: require tp1 ({tp1}) < entry ({entry}) < sl ({sl})"
+            if tp2 > 0 and tp2 > tp1:
+                return False, f"Invalid SELL geometry: require tp2 ({tp2}) <= tp1 ({tp1})"
+
+        # 2. Minimum Structural SL Distance (avoid noise stops)
+        if ltf_atr_14 > 0 and sl_dist < (1.2 * ltf_atr_14 - 1e-6):
+            return False, f"SL too tight: {sl_dist:.5f} < 1.2 * ATR(14) ({1.2 * ltf_atr_14:.5f}). Stop placed in noise."
+
+        # 3. Spread friction
+        max_spread_pct = 0.15 if mode.upper() == "SCALP" else 0.06
+        spread_ratio = current_spread_price / sl_dist
+        if spread_ratio > max_spread_pct:
+            return False, f"Spread friction excessive: spread is {spread_ratio*100:.1f}% of SL (max {max_spread_pct*100:.1f}%)"
+
+        # 4. Hard Net R:R Floor
+        tp1_dist = abs(tp1 - entry)
+        net_tp_dist = tp1_dist - current_spread_price
+        if net_tp_dist <= 0:
+            return False, f"Net TP distance non-positive after spread ({net_tp_dist:.5f})"
+
+        net_rr = net_tp_dist / sl_dist
+        min_rr = 1.8 if mode.upper() == "SCALP" else 2.5
+        if net_rr < (min_rr - 1e-4):
+            return False, f"Net R:R ratio {net_rr:.2f} < minimum required {min_rr:.1f} for {mode} (after spread {current_spread_price})"
 
         return True, "OK"
 

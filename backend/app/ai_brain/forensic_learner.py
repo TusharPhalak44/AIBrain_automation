@@ -183,6 +183,25 @@ class ForensicLearner:
                 logger.warning(f"Trade #{trade_id} not found for SL forensic analysis.")
                 return None
 
+            # Hard Guard: Trigger postmortem ONLY on true SL_HIT where price reached >= 80% of SL distance
+            if trade.exit_reason != "SL_HIT":
+                logger.info(f"Skipping postmortem for trade #{trade_id}: exit_reason is '{trade.exit_reason}', not SL_HIT.")
+                return None
+
+            entry_p = float(trade.entry_price or 0.0)
+            sl_p = float(trade.sl or 0.0)
+            exit_p = float(trade.exit_price or 0.0)
+            sl_distance = abs(entry_p - sl_p)
+            exit_distance = abs(entry_p - exit_p)
+
+            if sl_distance <= 0 or (exit_distance / sl_distance) < 0.80:
+                logger.warning(
+                    f"Skipping postmortem for trade #{trade_id}: exit distance {exit_distance:.4f} is only "
+                    f"{(exit_distance / sl_distance * 100) if sl_distance > 0 else 0:.1f}% of SL distance {sl_distance:.4f} (<80%). "
+                    "Rejecting poisoned non-SL trade from rule synthesis."
+                )
+                return None
+
             # Diagnose failure mode
             diag = self.diagnose_trade(trade, s)
 
@@ -224,6 +243,21 @@ class ForensicLearner:
                 logger.info(
                     f"Rule {rule_to_validate.rule_code} promoted to LIVE: {reason} (+{improvement_pct}%)"
                 )
+                try:
+                    import asyncio
+                    from backend.app.ai_brain.telegram_notifier import telegram_notifier
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(
+                        telegram_notifier.notify_system_guardrail(
+                            alert_type="RULE_PROMOTED",
+                            title=f"Rule {rule_to_validate.rule_code} Promoted to LIVE",
+                            details=f"Shadow backtest validation confirmed: {reason}. Net improvement: +{improvement_pct}%.",
+                            action_taken="Rule activated in live execution gates",
+                            severity="INFO",
+                        )
+                    )
+                except Exception as te:
+                    logger.debug(f"Rule promotion Telegram notification note: {te}")
             else:
                 rule_to_validate.backtest_net_improvement_pct = improvement_pct
                 s.commit()
@@ -567,6 +601,55 @@ class ForensicLearner:
             return _update(db)
         with SessionLocal() as session:
             return _update(session)
+
+    def clean_poisoned_rules(self, db: Optional[Session] = None) -> Dict[str, Any]:
+        """
+        Audit existing rows in learned_pair_rules and deprecate any rule
+        synthesized from a mislabeled or early closed trade (<80% SL distance).
+        """
+        close_db = False
+        if db is None:
+            db = SessionLocal()
+            close_db = True
+
+        try:
+            rules = db.query(LearnedPairRule).filter(LearnedPairRule.status != "DEPRECATED").all()
+            deprecated_count = 0
+            deprecated_codes = []
+
+            for r in rules:
+                loss_ids = json.loads(r.origin_loss_ids_json) if r.origin_loss_ids_json else []
+                is_poisoned = False
+
+                for lid in loss_ids:
+                    t = db.query(TradeLedger).filter_by(id=lid).first()
+                    if not t:
+                        is_poisoned = True
+                        break
+                    if t.exit_reason != "SL_HIT":
+                        is_poisoned = True
+                        break
+                    sl_dist = abs(float(t.entry_price or 0.0) - float(t.sl or 0.0))
+                    exit_dist = abs(float(t.entry_price or 0.0) - float(t.exit_price or 0.0))
+                    if sl_dist <= 0 or (exit_dist / sl_dist) < 0.80:
+                        is_poisoned = True
+                        break
+
+                if is_poisoned:
+                    r.status = "DEPRECATED"
+                    deprecated_count += 1
+                    deprecated_codes.append(r.rule_code)
+
+            db.commit()
+            logger.info(f"clean_poisoned_rules: Deprecated {deprecated_count} poisoned rules from vault.")
+            return {
+                "status": "SUCCESS",
+                "deprecated_count": deprecated_count,
+                "deprecated_codes": deprecated_codes,
+            }
+        finally:
+            if close_db:
+                db.close()
 
 
 forensic_learner = ForensicLearner()

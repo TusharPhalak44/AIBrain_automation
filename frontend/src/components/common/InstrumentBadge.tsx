@@ -54,3 +54,4 @@ export const InstrumentBadge: React.FC<InstrumentBadgeProps> = ({
     </div>
   );
 };
+

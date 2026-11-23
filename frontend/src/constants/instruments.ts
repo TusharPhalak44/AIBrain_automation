@@ -424,3 +424,4 @@ export function getAssetClassColor(assetClass: AssetClass | string): {
       };
   }
 }
+

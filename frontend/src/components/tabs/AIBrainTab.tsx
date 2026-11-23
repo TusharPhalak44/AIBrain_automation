@@ -24,6 +24,9 @@ import {
   Check,
   Code,
   Eye,
+  EyeOff,
+  Bell,
+  Save,
   Filter,
   Columns,
   Activity,
@@ -121,6 +124,44 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
   const [cacheStatus, setCacheStatus] = useState<CacheStatus | null>(null);
   const [cacheClearing, setCacheClearing] = useState(false);
 
+  // Telegram Alert Center State
+  const [telegramConfig, setTelegramConfig] = useState<{
+    enabled: boolean;
+    bot_token_masked: string;
+    bot_username: string;
+    admin_chat_id: string;
+    thread_id: string;
+    notify_pre_trigger: boolean;
+    notify_executions: boolean;
+    notify_be_and_partials: boolean;
+    notify_closures: boolean;
+    notify_system_alerts: boolean;
+    silent_pre_trigger: boolean;
+    is_configured: boolean;
+  }>({
+    enabled: true,
+    bot_token_masked: "",
+    bot_username: "",
+    admin_chat_id: "",
+    thread_id: "",
+    notify_pre_trigger: true,
+    notify_executions: true,
+    notify_be_and_partials: true,
+    notify_closures: true,
+    notify_system_alerts: true,
+    silent_pre_trigger: true,
+    is_configured: false,
+  });
+  const [telegramLoading, setTelegramLoading] = useState(false);
+  const [telegramSaving, setTelegramSaving] = useState(false);
+  const [showTokenInput, setShowTokenInput] = useState(false);
+  const [newTokenInput, setNewTokenInput] = useState("");
+  const [chatIdInput, setChatIdInput] = useState("");
+  const [threadIdInput, setThreadIdInput] = useState("");
+  const [testTemplate, setTestTemplate] = useState("EXECUTION");
+  const [testSymbol, setTestSymbol] = useState("GOLD#");
+  const [testSending, setTestSending] = useState(false);
+
   // Scanner & Timeframe Planning Config
   const [scannerConfig, setScannerConfig] = useState<ScannerConfig>({
     global_scan_interval_sec: 300,
@@ -140,10 +181,74 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
 
   const toast = useToast();
 
+  const fetchTelegramConfig = useCallback(async () => {
+    try {
+      setTelegramLoading(true);
+      const res = await api.telegram.getConfig();
+      if (res) {
+        setTelegramConfig(res);
+        setChatIdInput(res.admin_chat_id || "");
+        setThreadIdInput(res.thread_id || "");
+      }
+    } catch (e) {
+      console.debug("Failed to fetch Telegram config:", e);
+    } finally {
+      setTelegramLoading(false);
+    }
+  }, []);
+
+  const handleSaveTelegramConfig = async () => {
+    setTelegramSaving(true);
+    try {
+      const payload: any = {
+        enabled: telegramConfig.enabled,
+        admin_chat_id: chatIdInput.trim(),
+        thread_id: threadIdInput.trim() || null,
+        notify_pre_trigger: telegramConfig.notify_pre_trigger,
+        notify_executions: telegramConfig.notify_executions,
+        notify_be_and_partials: telegramConfig.notify_be_and_partials,
+        notify_closures: telegramConfig.notify_closures,
+        notify_system_alerts: telegramConfig.notify_system_alerts,
+        silent_pre_trigger: telegramConfig.silent_pre_trigger,
+      };
+      if (newTokenInput.trim()) {
+        payload.bot_token = newTokenInput.trim();
+      }
+      const updated = await api.telegram.updateConfig(payload);
+      setTelegramConfig(updated);
+      setNewTokenInput("");
+      setShowTokenInput(false);
+      toast.success("Telegram Settings Saved", "Alert channels and notifications updated.");
+    } catch (e: any) {
+      toast.error("Save Failed", e.message || String(e));
+    } finally {
+      setTelegramSaving(false);
+    }
+  };
+
+  const handleSendTestPreview = async () => {
+    setTestSending(true);
+    try {
+      const res = await api.telegram.sendTestPreview({
+        template_type: testTemplate,
+        symbol: testSymbol,
+        chat_id: chatIdInput.trim() || undefined,
+      });
+      toast.success("Telegram Test Sent", res.message || `Dispatched ${testTemplate} alert preview.`);
+    } catch (e: any) {
+      toast.error("Test Failed", e.message || String(e));
+    } finally {
+      setTestSending(false);
+    }
+  };
+
   const handleSendTelegramAlert = async (item: any) => {
     try {
-      await api.telegram.testMessage();
-      toast.success("Alert Sent", `Dispatched setup alert for ${item.symbol} to Telegram.`);
+      await api.telegram.sendTestPreview({
+        template_type: "SETUP",
+        symbol: item.symbol,
+      });
+      toast.success("Radar Alert Sent", `Dispatched setup alert for ${item.symbol} to Telegram.`);
     } catch (e: any) {
       toast.error("Alert Failed", e.message || String(e));
     }
@@ -188,13 +293,13 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
       setLearnedRules(safeArr(rulesData));
       setUpcomingData(upcomingPayload || { actionable_setups: [], watchlist_radar: [] });
       setPatternMemory(safeArr(patternsPayload));
-      await Promise.all([fetchCacheStatus(), fetchScannerConfig()]);
+      await Promise.all([fetchCacheStatus(), fetchScannerConfig(), fetchTelegramConfig()]);
     } catch (e: any) {
       console.error("Failed to fetch AI supervisor data:", e);
     } finally {
       setIsLoading(false);
     }
-  }, [selectedSymbol, fetchCacheStatus, fetchScannerConfig]);
+  }, [selectedSymbol, fetchCacheStatus, fetchScannerConfig, fetchTelegramConfig]);
 
   useEffect(() => {
     fetchBrainData();
@@ -580,6 +685,312 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
               {cacheStatus?.last_purge_summary?.items_cleared ?? 0} purged ({cacheStatus?.last_purge_summary?.reason || "Active"})
             </div>
           </div>
+        </div>
+      </div>
+
+      {/* 3.5. TELEGRAM NOTIFICATION CENTER & ALERT ENGINE */}
+      <div className="bg-[#121824] border border-slate-800 rounded-xl p-4 space-y-4">
+        {/* Header */}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/80 pb-3">
+          <div className="flex items-center gap-3">
+            <div className="p-2.5 rounded-lg bg-blue-500/10 text-blue-400 border border-blue-500/20">
+              <Send className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 className="font-bold text-white text-sm tracking-wide">
+                  TELEGRAM NOTIFICATION CENTER & ALERT ENGINE
+                </h3>
+                <span
+                  className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                    telegramConfig.enabled && telegramConfig.is_configured
+                      ? "bg-emerald-950 text-emerald-400 border border-emerald-800"
+                      : !telegramConfig.enabled
+                      ? "bg-slate-900 text-slate-500 border border-slate-800"
+                      : "bg-amber-950 text-amber-400 border border-amber-800 animate-pulse"
+                  }`}
+                >
+                  {telegramConfig.enabled && telegramConfig.is_configured
+                    ? "🟢 CONNECTED"
+                    : !telegramConfig.enabled
+                    ? "⚪ DISABLED"
+                    : "⚠️ NOT CONFIGURED"}
+                </span>
+                {telegramConfig.bot_username && (
+                  <span className="text-xs text-blue-400 font-mono">
+                    @{telegramConfig.bot_username}
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-slate-400">
+                Non-blocking asynchronous institutional HTML alerting with anti-spam deduplication and granular category controls.
+              </p>
+            </div>
+          </div>
+
+          {/* Master Toggle & Save Controls */}
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() =>
+                setTelegramConfig((prev) => ({ ...prev, enabled: !prev.enabled }))
+              }
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border transition ${
+                telegramConfig.enabled
+                  ? "bg-emerald-950 text-emerald-300 border-emerald-700/80"
+                  : "bg-slate-900 text-slate-400 border-slate-800"
+              }`}
+            >
+              <span>{telegramConfig.enabled ? "MASTER: ON" : "MASTER: OFF"}</span>
+            </button>
+
+            <button
+              disabled={telegramSaving}
+              onClick={handleSaveTelegramConfig}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-lg text-xs shadow transition disabled:opacity-50"
+            >
+              <Save className={`w-3.5 h-3.5 ${telegramSaving ? "animate-spin" : ""}`} />
+              <span>{telegramSaving ? "Saving..." : "Save Settings"}</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Credentials & Routing Grid */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          {/* Bot Token Input */}
+          <div className="bg-slate-950/70 border border-slate-800/80 rounded-lg p-3 space-y-1.5">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-semibold text-slate-300">Bot Token</span>
+              <button
+                type="button"
+                onClick={() => setShowTokenInput(!showTokenInput)}
+                className="text-[10px] text-blue-400 hover:text-blue-300 font-mono flex items-center gap-1"
+              >
+                {showTokenInput ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+                <span>{showTokenInput ? "Cancel" : "Change Token"}</span>
+              </button>
+            </div>
+            {showTokenInput ? (
+              <input
+                type="password"
+                value={newTokenInput}
+                onChange={(e) => setNewTokenInput(e.target.value)}
+                placeholder="Paste token from @BotFather..."
+                className="w-full bg-slate-900 border border-blue-500/50 rounded px-2.5 py-1 text-xs text-white font-mono placeholder:text-slate-600 focus:outline-none focus:border-blue-400"
+              />
+            ) : (
+              <div className="text-xs font-mono text-slate-300 bg-slate-900/60 rounded px-2.5 py-1 border border-slate-850 truncate">
+                {telegramConfig.bot_token_masked || "No bot token configured"}
+              </div>
+            )}
+          </div>
+
+          {/* Admin Chat ID Input */}
+          <div className="bg-slate-950/70 border border-slate-800/80 rounded-lg p-3 space-y-1.5">
+            <span className="text-[11px] font-semibold text-slate-300">Admin Chat ID</span>
+            <input
+              type="text"
+              value={chatIdInput}
+              onChange={(e) => setChatIdInput(e.target.value)}
+              placeholder="e.g. 1229234929 or -100..."
+              className="w-full bg-slate-900 border border-slate-800 rounded px-2.5 py-1 text-xs text-white font-mono placeholder:text-slate-600 focus:outline-none focus:border-blue-400"
+            />
+          </div>
+
+          {/* Thread / Topic ID (Optional) */}
+          <div className="bg-slate-950/70 border border-slate-800/80 rounded-lg p-3 space-y-1.5">
+            <span className="text-[11px] font-semibold text-slate-300">
+              Message Thread ID <span className="text-slate-500 font-normal">(Optional Forum Topic)</span>
+            </span>
+            <input
+              type="text"
+              value={threadIdInput}
+              onChange={(e) => setThreadIdInput(e.target.value)}
+              placeholder="e.g. 42 (Leave blank for default chat)"
+              className="w-full bg-slate-900 border border-slate-800 rounded px-2.5 py-1 text-xs text-white font-mono placeholder:text-slate-600 focus:outline-none focus:border-blue-400"
+            />
+          </div>
+        </div>
+
+        {/* Granular Alert Category Subscriptions Matrix */}
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-bold text-white tracking-wide uppercase">
+              Alert Category Subscriptions
+            </span>
+            <label className="flex items-center gap-1.5 cursor-pointer text-xs font-mono text-slate-400 hover:text-white">
+              <input
+                type="checkbox"
+                checked={telegramConfig.silent_pre_trigger}
+                onChange={(e) =>
+                  setTelegramConfig((prev) => ({
+                    ...prev,
+                    silent_pre_trigger: e.target.checked,
+                  }))
+                }
+                className="rounded border-slate-700 bg-slate-900 text-blue-500 focus:ring-0"
+              />
+              <span>🔕 Silent Radar Pings (No Push Sound)</span>
+            </label>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-5 gap-2.5">
+            {/* 1. Pre-Trigger Radar */}
+            <div
+              onClick={() =>
+                setTelegramConfig((prev) => ({
+                  ...prev,
+                  notify_pre_trigger: !prev.notify_pre_trigger,
+                }))
+              }
+              className={`cursor-pointer rounded-lg p-2.5 border transition ${
+                telegramConfig.notify_pre_trigger
+                  ? "bg-amber-950/30 border-amber-500/50 text-amber-200"
+                  : "bg-slate-950/40 border-slate-850 text-slate-500"
+              }`}
+            >
+              <div className="flex items-center justify-between text-xs font-bold">
+                <span>📡 Setup Radar</span>
+                <span className="text-[10px]">{telegramConfig.notify_pre_trigger ? "ON" : "OFF"}</span>
+              </div>
+              <p className="text-[10px] text-slate-400 mt-1 leading-snug">
+                Pre-trigger radar setups when readiness &ge; 60% (90m / 6h TTL).
+              </p>
+            </div>
+
+            {/* 2. Executions */}
+            <div
+              onClick={() =>
+                setTelegramConfig((prev) => ({
+                  ...prev,
+                  notify_executions: !prev.notify_executions,
+                }))
+              }
+              className={`cursor-pointer rounded-lg p-2.5 border transition ${
+                telegramConfig.notify_executions
+                  ? "bg-emerald-950/30 border-emerald-500/50 text-emerald-200"
+                  : "bg-slate-950/40 border-slate-850 text-slate-500"
+              }`}
+            >
+              <div className="flex items-center justify-between text-xs font-bold">
+                <span>🟢 Executions</span>
+                <span className="text-[10px]">{telegramConfig.notify_executions ? "ON" : "OFF"}</span>
+              </div>
+              <p className="text-[10px] text-slate-400 mt-1 leading-snug">
+                Market orders & resting limits with exact 5-Gate pass audit.
+              </p>
+            </div>
+
+            {/* 3. BE & Partials */}
+            <div
+              onClick={() =>
+                setTelegramConfig((prev) => ({
+                  ...prev,
+                  notify_be_and_partials: !prev.notify_be_and_partials,
+                }))
+              }
+              className={`cursor-pointer rounded-lg p-2.5 border transition ${
+                telegramConfig.notify_be_and_partials
+                  ? "bg-cyan-950/30 border-cyan-500/50 text-cyan-200"
+                  : "bg-slate-950/40 border-slate-850 text-slate-500"
+              }`}
+            >
+              <div className="flex items-center justify-between text-xs font-bold">
+                <span>🔒 BE & Partials</span>
+                <span className="text-[10px]">{telegramConfig.notify_be_and_partials ? "ON" : "OFF"}</span>
+              </div>
+              <p className="text-[10px] text-slate-400 mt-1 leading-snug">
+                +1.0R Breakeven lock and 60% TP1 partial scale-out with trail.
+              </p>
+            </div>
+
+            {/* 4. Closures & Scorecard */}
+            <div
+              onClick={() =>
+                setTelegramConfig((prev) => ({
+                  ...prev,
+                  notify_closures: !prev.notify_closures,
+                }))
+              }
+              className={`cursor-pointer rounded-lg p-2.5 border transition ${
+                telegramConfig.notify_closures
+                  ? "bg-purple-950/30 border-purple-500/50 text-purple-200"
+                  : "bg-slate-950/40 border-slate-850 text-slate-500"
+              }`}
+            >
+              <div className="flex items-center justify-between text-xs font-bold">
+                <span>🏆 Closures</span>
+                <span className="text-[10px]">{telegramConfig.notify_closures ? "ON" : "OFF"}</span>
+              </div>
+              <p className="text-[10px] text-slate-400 mt-1 leading-snug">
+                Final deal exits (gross, swap, comm, net PnL) + daily scorecard.
+              </p>
+            </div>
+
+            {/* 5. System Guardrails */}
+            <div
+              onClick={() =>
+                setTelegramConfig((prev) => ({
+                  ...prev,
+                  notify_system_alerts: !prev.notify_system_alerts,
+                }))
+              }
+              className={`cursor-pointer rounded-lg p-2.5 border transition ${
+                telegramConfig.notify_system_alerts
+                  ? "bg-red-950/30 border-red-500/50 text-red-200"
+                  : "bg-slate-950/40 border-slate-850 text-slate-500"
+              }`}
+            >
+              <div className="flex items-center justify-between text-xs font-bold">
+                <span>🚨 Guardrails</span>
+                <span className="text-[10px]">{telegramConfig.notify_system_alerts ? "ON" : "OFF"}</span>
+              </div>
+              <p className="text-[10px] text-slate-400 mt-1 leading-snug">
+                -3.0% Daily DD circuit breaker, forensic rule promotions, vault.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* Institutional Template Preview Simulator */}
+        <div className="bg-slate-950/60 border border-slate-850 rounded-lg p-3 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-bold text-white">Preview Simulator:</span>
+            <select
+              value={testTemplate}
+              onChange={(e) => setTestTemplate(e.target.value)}
+              className="bg-slate-900 border border-slate-800 text-xs text-white rounded px-2.5 py-1 font-mono focus:outline-none focus:border-blue-400"
+            >
+              <option value="SETUP">📡 1. Pre-Trigger Setup Radar</option>
+              <option value="EXECUTION">🟢 2. Live Market Execution (Buy/Sell)</option>
+              <option value="LIMIT">⏳ 3. Pending Limit Filled / Expired</option>
+              <option value="BE">🔒 4. Breakeven Locked (+1.0R)</option>
+              <option value="TP1">💰 5. TP1 Hit (60% Banked)</option>
+              <option value="CLOSE">🏆 6. Trade Closed & Scorecard</option>
+              <option value="GUARDRAIL">🚨 7. System Guardrail & Vault Alert</option>
+            </select>
+
+            <select
+              value={testSymbol}
+              onChange={(e) => setTestSymbol(e.target.value)}
+              className="bg-slate-900 border border-slate-800 text-xs text-white rounded px-2.5 py-1 font-mono focus:outline-none focus:border-blue-400"
+            >
+              <option value="GOLD#">GOLD#</option>
+              <option value="EURUSD#">EURUSD#</option>
+              <option value="BTCUSD#">BTCUSD#</option>
+              <option value="OILCash#">OILCash#</option>
+              <option value="USDJPY#">USDJPY#</option>
+              <option value="ETHUSD#">ETHUSD#</option>
+            </select>
+          </div>
+
+          <button
+            disabled={testSending || !telegramConfig.enabled}
+            onClick={handleSendTestPreview}
+            className="flex items-center gap-1.5 px-3 py-1 bg-slate-900 hover:bg-slate-800 text-blue-400 border border-blue-500/40 hover:border-blue-400 font-bold rounded text-xs transition disabled:opacity-50"
+          >
+            <Send className={`w-3.5 h-3.5 ${testSending ? "animate-spin" : ""}`} />
+            <span>{testSending ? "Sending Preview..." : "Send Test Alert Preview"}</span>
+          </button>
         </div>
       </div>
 
