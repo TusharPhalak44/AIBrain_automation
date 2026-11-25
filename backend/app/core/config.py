@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
+from sqlalchemy.engine import URL
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
