@@ -236,6 +236,7 @@ export function useLiveStore() {
     switchMode,
     approveCopilot,
     rejectCopilot,
+    fetchLiveSnapshot,
   };
 }
 

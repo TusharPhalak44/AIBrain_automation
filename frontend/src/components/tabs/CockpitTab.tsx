@@ -102,18 +102,16 @@ export const CockpitTab: React.FC<CockpitTabProps> = ({
   const [tpPrice, setTpPrice] = useState<string>("");
   const [isExecuting, setIsExecuting] = useState(false);
 
-  // Initialize default SL/TP whenever symbol or live price updates if inputs are empty
+  // Reset default SL/TP whenever selectedSymbol changes
   useEffect(() => {
     if (activeQuote.bid > 0) {
       const step = 1 / Math.pow(10, activeInst.digits);
       const slDist = (activeInst.defaultSpread * 3 * step) || 1.0;
-      // Default to 1.5R SL/TP suggestion for convenience
-      if (!slPrice) {
-        setSlPrice(formatSymbolPrice(selectedSymbol, activeQuote.bid - slDist));
-      }
-      if (!tpPrice) {
-        setTpPrice(formatSymbolPrice(selectedSymbol, activeQuote.ask + slDist * 2));
-      }
+      setSlPrice(formatSymbolPrice(selectedSymbol, activeQuote.bid - slDist));
+      setTpPrice(formatSymbolPrice(selectedSymbol, activeQuote.ask + slDist * 2));
+    } else {
+      setSlPrice("");
+      setTpPrice("");
     }
   }, [selectedSymbol]);
 
@@ -194,6 +192,24 @@ export const CockpitTab: React.FC<CockpitTabProps> = ({
 
     async function loadCandles() {
       setIsLoadingChart(true);
+      // Clear stale candles from previous pair immediately and sync price scale precision
+      setCandleCount(0);
+      setOverlays({});
+      if (candleSeriesRef.current) {
+        const minMove = 1 / Math.pow(10, activeInst.digits);
+        candleSeriesRef.current.applyOptions({
+          priceFormat: {
+            type: "price",
+            precision: activeInst.digits,
+            minMove,
+          },
+        });
+        candleSeriesRef.current.setData([]);
+      }
+      if (volumeSeriesRef.current) {
+        volumeSeriesRef.current.setData([]);
+      }
+
       try {
         const data = await api.candles.get(selectedSymbol, selectedTimeframe, 250);
 
@@ -231,7 +247,7 @@ export const CockpitTab: React.FC<CockpitTabProps> = ({
         }
       } catch (err: any) {
         console.error("Failed to load live candles:", err);
-        setChartStatus("ERROR");
+        if (!isCancelled) setChartStatus("ERROR");
       } finally {
         if (!isCancelled) setIsLoadingChart(false);
       }
@@ -241,7 +257,7 @@ export const CockpitTab: React.FC<CockpitTabProps> = ({
     return () => {
       isCancelled = true;
     };
-  }, [selectedSymbol, selectedTimeframe]);
+  }, [selectedSymbol, selectedTimeframe, activeInst.digits]);
 
   // Close position handler
   const handleClosePosition = async (ticket: number) => {
@@ -478,7 +494,13 @@ export const CockpitTab: React.FC<CockpitTabProps> = ({
 
           {/* Chart Canvas */}
           <div className="flex-1 w-full h-full relative" ref={chartContainerRef}>
-            {((!isMt5Connected || chartStatus === "MT5_DISCONNECTED") && candleCount === 0) && (
+            {isLoadingChart && (
+              <div className="absolute top-3 right-3 z-20 flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-900/90 border border-slate-700 text-cyan-400 text-[11px] font-mono shadow-md">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                <span>Loading {selectedSymbol} ({selectedTimeframe})...</span>
+              </div>
+            )}
+            {(!isLoadingChart && (!isMt5Connected || chartStatus === "MT5_DISCONNECTED") && candleCount === 0) && (
               <div className="absolute inset-0 bg-black/80 backdrop-blur-xs flex flex-col items-center justify-center z-20 text-center p-6">
                 <div className="w-12 h-12 rounded-full bg-rose-950/80 border border-rose-500/50 flex items-center justify-center mb-3 text-rose-400 shadow-[0_0_15px_rgba(244,63,94,0.3)]">
                   <Radio className="w-6 h-6 animate-pulse" />
@@ -487,6 +509,17 @@ export const CockpitTab: React.FC<CockpitTabProps> = ({
                 <p className="text-slate-400 text-xs max-w-sm">
                   Candlestick feed is paused. Strictly zero mock or synthetic fallback candles are rendered.
                   Connect your XM MT5 profile in Settings to stream live institutional ticks.
+                </p>
+              </div>
+            )}
+            {(!isLoadingChart && isMt5Connected && (chartStatus === "NO_DATA" || chartStatus === "ERROR") && candleCount === 0) && (
+              <div className="absolute inset-0 bg-black/75 backdrop-blur-xs flex flex-col items-center justify-center z-20 text-center p-6">
+                <AlertCircle className="w-8 h-8 text-amber-400 mb-2" />
+                <h3 className="text-sm font-bold text-white mb-1 font-mono">
+                  No Historical Bars Returned for {selectedSymbol} ({selectedTimeframe})
+                </h3>
+                <p className="text-slate-400 text-xs max-w-sm">
+                  Ensure {selectedSymbol} is enabled in MT5 Market Watch or switch timeframe to sync bars.
                 </p>
               </div>
             )}

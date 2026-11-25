@@ -425,10 +425,13 @@ class GeminiSupervisor:
             close_db = True
 
         try:
+            clean = symbol.rstrip("#")
             rules = (
                 db.query(LearnedPairRule)
                 .filter(
-                    (LearnedPairRule.symbol == symbol) | (LearnedPairRule.symbol == f"{symbol}#"),
+                    (LearnedPairRule.symbol == symbol)
+                    | (LearnedPairRule.symbol == clean)
+                    | (LearnedPairRule.symbol == f"{clean}#"),
                     LearnedPairRule.status.in_(["LIVE", "LOCKED"]),
                 )
                 .all()
@@ -653,6 +656,53 @@ class GeminiSupervisor:
             tp2 = float(swing_sig["tp2"])
 
             regime = "TRENDING_UP" if direction == "BUY" else "TRENDING_DOWN"
+
+            # Check rule blocking with condition evaluation for SWING
+            blocked = False
+            block_reason = ""
+            for r in active_rules:
+                if r.get("mode") in ("SWING", "BOTH"):
+                    cond = r.get("condition") or {}
+                    if isinstance(cond, str):
+                        try:
+                            cond = json.loads(cond)
+                        except Exception:
+                            cond = {}
+                    filt_act = cond.get("filter_action", "")
+                    indicator = cond.get("indicator", "")
+                    if filt_act in (f"BLOCK_{direction}", "BLOCK_ALL"):
+                        if indicator == "news_guard" and packet.news_blackout.get("is_blackout", False):
+                            blocked = True
+                            block_reason = f"Blocked by rule {r['rule_code']}: Tier-1 news blackout"
+                            break
+                        elif indicator == "market_regime" and packet.scalp_bias_m15_h1 == "CHOP":
+                            blocked = True
+                            block_reason = f"Blocked by rule {r['rule_code']}: Low-volatility chop"
+                            break
+                        elif indicator == "ema_trend" and ((direction == "BUY" and packet.swing_bias_h4_d1 == "BEARISH") or (direction == "SELL" and packet.swing_bias_h4_d1 == "BULLISH")):
+                            blocked = True
+                            block_reason = f"Blocked by rule {r['rule_code']}: Higher-timeframe counter-trend"
+                            break
+                        elif filt_act == "BLOCK_ALL":
+                            blocked = True
+                            block_reason = f"Blocked by rule {r['rule_code']}"
+                            break
+
+            if blocked:
+                return GeminiSupervisoryOutput(
+                    market_regime=regime,
+                    decision="WAIT",
+                    recommended_mode="NONE",
+                    confidence=0.70,
+                    entry_price=entry,
+                    stop_loss=sl,
+                    tp1=tp1,
+                    tp2=tp2,
+                    bullish_factors=["Strategy swing trigger"] if direction == "BUY" else [],
+                    bearish_factors=["Strategy swing trigger"] if direction == "SELL" else [],
+                    news_and_macro_summary="No macro blackout. Setup blocked by learned rule.",
+                    trade_plan_thesis=f"Candidate swing setup rejected: {block_reason}",
+                )
             swing_upcoming = UpcomingSetupPlan(
                 watch_bias="BULLISH_WATCH" if direction == "BUY" else "BEARISH_WATCH",
                 setup_mode="SWING",
@@ -704,15 +754,23 @@ class GeminiSupervisor:
         price = packet.ask if packet.ask > 0 else (packet.bid or 1.0)
         is_bullish = packet.scalp_bias_m15_h1 == "BULLISH" or packet.swing_bias_h4_d1 == "BULLISH"
         bias = "BULLISH_WATCH" if is_bullish else "BEARISH_WATCH"
-        atr_est = max(0.001, spread_price * 10)
+        atr_est = max(0.0015, spread_price * 10)
         if packet.symbol.startswith("GOLD"):
-            atr_est = max(3.0, spread_price * 8)
+            atr_est = max(4.5, spread_price * 8)
+        elif "SILVER" in packet.symbol:
+            atr_est = max(0.25, spread_price * 8)
+        elif "OIL" in packet.symbol or "BRENT" in packet.symbol:
+            atr_est = max(0.85, spread_price * 10)
+        elif "JPY" in packet.symbol:
+            atr_est = max(0.20, spread_price * 10)
         elif "BTC" in packet.symbol:
-            atr_est = max(300.0, spread_price * 5)
+            atr_est = max(450.0, spread_price * 8)
         elif "ETH" in packet.symbol:
-            atr_est = max(20.0, spread_price * 5)
+            atr_est = max(30.0, spread_price * 8)
         elif "SOL" in packet.symbol:
-            atr_est = max(1.0, spread_price * 5)
+            atr_est = max(2.0, spread_price * 8)
+        elif "XRP" in packet.symbol:
+            atr_est = max(0.02, spread_price * 8)
 
         if is_bullish:
             p_entry = round(price - (atr_est * 0.4), digits)
@@ -904,12 +962,15 @@ class GeminiSupervisor:
                     is_roll = (now_u.hour == 21 and now_u.minute >= 50) or (now_u.hour == 22) or (now_u.hour == 23 and now_u.minute <= 10)
                     rollover_blackout_status = "ACTIVE_BLACKOUT (21:50-23:10 UTC - Broker Server Rollover / Spread Blowout)" if is_roll else "INACTIVE (Liquid Trading Session)"
 
-                    open_trades = db.query(TradeLedger).filter(TradeLedger.status.in_(["OPEN", "PARTIAL_TP1"])).all()
-                    if open_trades:
-                        t_desc = [f"{t.symbol} {t.direction} {t.lots}L" for t in open_trades[:5]]
-                        open_positions_summary = f"{len(open_trades)} Open: [{', '.join(t_desc)}]"
-                    else:
-                        open_positions_summary = "None (Zero Exposure - 0/5 positions)"
+                    open_positions_summary = "None (Zero Exposure - 0/5 positions)"
+                    try:
+                        with SessionLocal() as count_db:
+                            open_trades = count_db.query(TradeLedger).filter(TradeLedger.status.in_(["OPEN", "PARTIAL_TP1"])).all()
+                            if open_trades:
+                                t_desc = [f"{t.symbol} {t.direction} {t.lots}L" for t in open_trades[:5]]
+                                open_positions_summary = f"{len(open_trades)} Open: [{', '.join(t_desc)}]"
+                    except Exception as oe:
+                        logger.debug(f"Could not load open positions for prompt summary: {oe}")
 
                     prompt_context = {
                         "symbol": packet.symbol,
@@ -1057,6 +1118,8 @@ class GeminiSupervisor:
                 save_db.add(report)
                 save_db.commit()
                 save_db.refresh(report)
+                if close_save_db:
+                    save_db.expunge(report)
 
                 # Record token usage ledger if response returned
                 if response is not None:

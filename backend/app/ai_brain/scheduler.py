@@ -623,12 +623,13 @@ class LiveIntervalScheduler:
                 self.circuit_breaker_reason = None
                 self.circuit_breaker_until_utc = None
 
-        # Fetch closed trades today
+        # Fetch closed trades today (excluding historical reconciliations opened > 24 hours ago)
         today_closed = (
             db.query(TradeLedger)
             .filter(
                 TradeLedger.status == "CLOSED",
                 TradeLedger.closed_at_utc >= today_start,
+                TradeLedger.opened_at_utc >= (now - timedelta(hours=24)),
             )
             .all()
         )
@@ -646,8 +647,20 @@ class LiveIntervalScheduler:
 
         net_today = realized_today + floating_today
 
+        # Resolve live baseline equity dynamically
         profile = db.query(MT5AccountProfile).filter_by(account_type="DEMO").first()
-        baseline_equity = float(profile.last_equity) if profile and profile.last_equity > 0 else 10000.0
+        baseline_equity = 10000.0
+        if mt5_connector.is_connected:
+            try:
+                import MetaTrader5 as mt5
+                acct = mt5.account_info()
+                if acct and acct.equity > 0:
+                    baseline_equity = float(acct.equity)
+            except Exception:
+                pass
+        if baseline_equity <= 1000.0 and profile and profile.last_equity and float(profile.last_equity) > 0:
+            baseline_equity = float(profile.last_equity)
+        baseline_equity = max(baseline_equity, 1000.0)
 
         if baseline_equity > 0:
             dd_pct = (net_today / baseline_equity) * 100.0
@@ -722,24 +735,86 @@ class LiveIntervalScheduler:
         # Check circuit breaker
         is_tripped = bool(self.circuit_breaker_tripped and self.circuit_breaker_until_utc and now < self.circuit_breaker_until_utc)
 
-        # Check active cooldowns
+        # Fetch recent closed trades once to avoid redundant queries across all pairs
+        recent_closed = (
+            db.query(TradeLedger)
+            .filter(TradeLedger.status == "CLOSED")
+            .order_by(TradeLedger.closed_at_utc.desc())
+            .limit(50)
+            .all()
+        )
+        latest_by_sym: Dict[str, Any] = {}
+        for t in recent_closed:
+            bs = (t.symbol or "").rstrip("#").upper()
+            if bs not in latest_by_sym:
+                latest_by_sym[bs] = t
+
         cooldowns: Dict[str, str] = {}
         for sym in list(self.pair_schedules.keys()):
-            ok_scalp, msg_scalp = self._check_post_exit_cooldown(sym, "SCALP", db)
-            if not ok_scalp:
-                cooldowns[sym] = msg_scalp
+            bs = sym.rstrip("#").upper()
+            lt = latest_by_sym.get(bs)
+            if lt and lt.closed_at_utc:
+                reason = lt.exit_reason or ""
+                if reason in ("SL_HIT", "MANUAL_MOBILE", "MANUAL_TERMINAL", "STOP_OUT", "MARGIN_STOP_OUT"):
+                    c_at = lt.closed_at_utc
+                    if c_at.tzinfo is None:
+                        c_at = c_at.replace(tzinfo=timezone.utc)
+                    elapsed = (now - c_at).total_seconds()
+                    if elapsed < 1800:
+                        rem = int(1800 - elapsed)
+                        cooldowns[sym] = f"COOLDOWN_ACTIVE: {bs} in cooldown ({rem}s remaining for SCALP)"
+
+        # App settings & account context
+        st = db.query(AppSettings).filter_by(id=1).first()
+        active_type = st.active_account_type if st else "DEMO"
+        scan_int_min = round(float(st.global_scan_interval_sec or 300) / 60.0, 1) if st else 3.0
+
+        prof = db.query(MT5AccountProfile).filter_by(account_type=active_type).first()
+        equity = float(prof.last_equity) if prof and prof.last_equity else 50000.0
+        floating_pnl = float(prof.last_equity - prof.last_balance) if prof and prof.last_equity and prof.last_balance else 0.0
+
+        # Live next scan seconds across active pair schedules
+        secs_list = [
+            max(0, int((s["next_scan_utc"] - now).total_seconds()))
+            for s in self.pair_schedules.values()
+            if "next_scan_utc" in s
+        ]
+        next_scan_sec = min(secs_list) if secs_list else int(scan_int_min * 60)
+
+        # Market session derivation from UTC hour
+        hour = now.hour
+        if 0 <= hour < 7:
+            session_name = "Tokyo / Asian"
+        elif 7 <= hour < 12:
+            session_name = "London Open"
+        elif 12 <= hour < 17:
+            session_name = "London / NY Overlap"
+        elif 17 <= hour < 21:
+            session_name = "New York Afternoon"
+        else:
+            session_name = "Pacific Rollover"
 
         return {
+            "next_scan_seconds": next_scan_sec,
+            "scan_interval_minutes": scan_int_min,
             "open_positions_count": open_count,
+            "max_positions": 5,
             "max_positions_limit": 5,
             "open_risk_pct": total_risk_pct,
+            "max_risk_pct": 2.50,
             "max_risk_limit_pct": 2.50,
+            "circuit_breaker_status": "PAUSED" if is_tripped else "HEALTHY",
             "circuit_breaker": {
                 "status": "PAUSED" if is_tripped else "HEALTHY",
                 "tripped": is_tripped,
                 "reason": self.circuit_breaker_reason if is_tripped else None,
                 "until_ist": to_ist_str(self.circuit_breaker_until_utc) if is_tripped and self.circuit_breaker_until_utc else None,
             },
+            "account_equity": equity,
+            "floating_pnl": floating_pnl,
+            "mt5_connected": bool(mt5_connector.is_connected),
+            "is_demo": active_type == "DEMO",
+            "active_session": session_name,
             "cooldowns": cooldowns,
         }
 
@@ -1035,6 +1110,17 @@ class LiveIntervalScheduler:
                     report.thesis_text = f"{report.thesis_text or ''} | [RULE FILTER] {rule_block_reason}"
                     db.commit()
                     return report
+
+                # Friday Weekend Gap Guard: Block opening new non-crypto SWING positions after 19:00 UTC on Fridays
+                if mode.upper() == "SWING" and getattr(pair, "asset_class", "FOREX") in ("FOREX", "COMMODITIES"):
+                    now_check = now_utc()
+                    if now_check.weekday() == 4 and now_check.hour >= 19:
+                        gap_msg = f"Friday Weekend Gap Guard active: Blocked {pair.asset_class} SWING position after 19:00 UTC."
+                        logger.info(f"Setup on {symbol} blocked: {gap_msg}")
+                        report.execution_status = "BLOCKED_WEEKEND_GAP_GUARD"
+                        report.thesis_text = f"{report.thesis_text or ''} | [FRIDAY GAP GUARD] {gap_msg}"
+                        db.commit()
+                        return report
 
                 # Route by mode: Strictly Autonomous AUTO Execution (Market or Resting Limit)
                 await self._dispatch_auto_order(

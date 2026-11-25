@@ -1,0 +1,39 @@
+# Python / Virtualenvs
+.venv/
+venv/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node / Frontend builds
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+dist/
+
+# Git & IDE
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# Local Secrets & Logs
+.env
+.env.*
+!.env.example
+!.env.production.example
+*.log
+logs/
+data/
+backend/app/data/
+
+# Windows-only / Large SQL dumps
+*.bat
+setup_mysql.sql
+

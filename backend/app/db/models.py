@@ -278,6 +278,57 @@ class BacktestRun(Base):
     )
 
 
+class SavedStrategy(Base):
+    """
+    Saved Strategies and Empirical PnL Vault.
+    Stores proven strategies with empirical scorecard metrics.
+    """
+
+    __tablename__ = "saved_strategies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    strategy_code: Mapped[str] = mapped_column(Text, nullable=False)
+    mode: Mapped[str] = mapped_column(String(16), default="SCALP", nullable=False)  # SCALP, SWING, BOTH
+    planning_tf: Mapped[str] = mapped_column(String(16), default="M15", nullable=False)
+    execution_tf: Mapped[str] = mapped_column(String(16), default="M5", nullable=False)
+    symbols_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)  # e.g. ["EURUSD#", "GOLD#"]
+    rules_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    prompt_template: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Empirical Scorecard Metrics
+    tested_net_pnl: Mapped[Decimal] = mapped_column(
+        Numeric(12, 2), default=Decimal("0.00"), nullable=False
+    )
+    profit_factor: Mapped[Decimal] = mapped_column(
+        Numeric(6, 2), default=Decimal("1.00"), nullable=False
+    )
+    win_rate_pct: Mapped[Decimal] = mapped_column(
+        Numeric(5, 2), default=Decimal("50.00"), nullable=False
+    )
+    total_r: Mapped[Decimal] = mapped_column(
+        Numeric(8, 2), default=Decimal("0.00"), nullable=False
+    )
+    max_drawdown_pct: Mapped[Decimal] = mapped_column(
+        Numeric(5, 2), default=Decimal("0.00"), nullable=False
+    )
+    sample_trades_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    test_source: Mapped[str] = mapped_column(
+        String(32), default="BACKTEST_XM", nullable=False
+    )  # BACKTEST_XM, LIVE_VERIFIED
+    tested_at_utc: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, nullable=False
+    )
+
+    is_active_live: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at_utc: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, nullable=False
+    )
+    updated_at_utc: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, onupdate=now_utc, nullable=False
+    )
+
+
 class TradeLedger(Base):
     """Central ledger for all planned, open, and closed positions."""
 

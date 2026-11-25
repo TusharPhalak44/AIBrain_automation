@@ -88,7 +88,11 @@ class TestTelegramNotifierCore:
         """Verify TEMPLATE 1: Pre-Trigger Setup Radar HTML structure."""
         captured_messages = []
 
-        async def mock_dispatch(html_message, category, silent, event_key, ttl_seconds):
+        async def mock_dispatch(*args, **kwargs):
+            html_message = kwargs.get("html_message") or (args[0] if len(args) > 0 else "")
+            category = kwargs.get("category") or (args[1] if len(args) > 1 else "PRE_TRIGGER")
+            silent = kwargs.get("silent") or (args[2] if len(args) > 2 else False)
+            event_key = kwargs.get("event_key") or (args[3] if len(args) > 3 else None)
             captured_messages.append({
                 "msg": html_message,
                 "cat": category,

@@ -318,14 +318,15 @@ class MarketPacketCompiler:
             if not pair:
                 return signals
 
-            # 1. Scalp Strategy
+            # 1. Scalp Strategy (Enforce closed-candle execution gate: evaluate on completed bars iloc[:-1])
             if pair.scalp_enabled and pair.scalp_strategy_id and df_m15 is not None and len(df_m15) >= 20:
                 strat = db.query(StrategyScript).filter_by(id=pair.scalp_strategy_id).first()
                 if strat:
                     try:
                         sandbox = StrategySandbox(strat.python_code)
                         params = json.loads(strat.default_params_json) if strat.default_params_json else {}
-                        sig = sandbox.evaluate(df_m15, params=params)
+                        eval_scalp_df = df_m15.iloc[:-1] if len(df_m15) > 1 else df_m15
+                        sig = sandbox.evaluate(eval_scalp_df, params=params)
                         if sig and sig.get("signal"):
                             signals["scalp_signal"] = {
                                 "strategy_id": strat.id,
@@ -341,7 +342,7 @@ class MarketPacketCompiler:
                     except Exception as e:
                         logger.warning(f"Error evaluating Scalp Strategy #{strat.id} for {symbol}: {e}")
 
-            # 2. Swing Strategy
+            # 2. Swing Strategy (Enforce closed-candle execution gate: evaluate on completed bars iloc[:-1])
             target_swing_df = df_h1 if df_h1 is not None and len(df_h1) >= 20 else df_m15
             if pair.swing_enabled and pair.swing_strategy_id and target_swing_df is not None and len(target_swing_df) >= 20:
                 strat = db.query(StrategyScript).filter_by(id=pair.swing_strategy_id).first()
@@ -349,7 +350,8 @@ class MarketPacketCompiler:
                     try:
                         sandbox = StrategySandbox(strat.python_code)
                         params = json.loads(strat.default_params_json) if strat.default_params_json else {}
-                        sig = sandbox.evaluate(target_swing_df, params=params)
+                        eval_swing_df = target_swing_df.iloc[:-1] if len(target_swing_df) > 1 else target_swing_df
+                        sig = sandbox.evaluate(eval_swing_df, params=params)
                         if sig and sig.get("signal"):
                             signals["swing_signal"] = {
                                 "strategy_id": strat.id,

@@ -220,7 +220,7 @@ class ForensicLearner:
                     rule_code=diag.rule_code,
                     symbol=diag.symbol,
                     mode=diag.mode,
-                    status="CANDIDATE",
+                    status="LIVE",  # Automatically set to LIVE upon synthesis per user requirement
                     condition_json=cond_str,
                     action_json=action_str,
                     origin_loss_ids_json=loss_ids_str,
@@ -234,36 +234,31 @@ class ForensicLearner:
             else:
                 rule_to_validate = existing_rule
 
-            # Run Shadow Validation Replay to check if rule qualifies for LIVE status
+            # Run Shadow Validation Replay to calculate net improvement metric
             promoted, improvement_pct, reason = self.replay_shadow_validation(rule_to_validate, s)
-            if promoted:
+            # Ensure rule is automatically LIVE (unless user previously explicitly RETIRED or LOCKED it)
+            if rule_to_validate.status not in ("LOCKED", "RETIRED"):
                 rule_to_validate.status = "LIVE"
-                rule_to_validate.backtest_net_improvement_pct = improvement_pct
-                s.commit()
-                logger.info(
-                    f"Rule {rule_to_validate.rule_code} promoted to LIVE: {reason} (+{improvement_pct}%)"
-                )
-                try:
-                    import asyncio
-                    from backend.app.ai_brain.telegram_notifier import telegram_notifier
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(
-                        telegram_notifier.notify_system_guardrail(
-                            alert_type="RULE_PROMOTED",
-                            title=f"Rule {rule_to_validate.rule_code} Promoted to LIVE",
-                            details=f"Shadow backtest validation confirmed: {reason}. Net improvement: +{improvement_pct}%.",
-                            action_taken="Rule activated in live execution gates",
-                            severity="INFO",
-                        )
+            rule_to_validate.backtest_net_improvement_pct = improvement_pct
+            s.commit()
+            logger.info(
+                f"Rule {rule_to_validate.rule_code} auto-applied to LIVE: {reason} (+{improvement_pct}%)"
+            )
+            try:
+                import asyncio
+                from backend.app.ai_brain.telegram_notifier import telegram_notifier
+                loop = asyncio.get_running_loop()
+                loop.create_task(
+                    telegram_notifier.notify_system_guardrail(
+                        alert_type="RULE_PROMOTED",
+                        title=f"Rule {rule_to_validate.rule_code} Active LIVE",
+                        details=f"Auto-applied to live execution gates. Diagnostic validation: {reason}. Net improvement: +{improvement_pct}%.",
+                        action_taken="Rule activated automatically in live execution gates",
+                        severity="INFO",
                     )
-                except Exception as te:
-                    logger.debug(f"Rule promotion Telegram notification note: {te}")
-            else:
-                rule_to_validate.backtest_net_improvement_pct = improvement_pct
-                s.commit()
-                logger.info(
-                    f"Rule {rule_to_validate.rule_code} remains in CANDIDATE: {reason}"
                 )
+            except Exception as te:
+                logger.debug(f"Rule activation Telegram notification note: {te}")
 
             return rule_to_validate
 
@@ -445,7 +440,7 @@ class ForensicLearner:
             db.query(LearnedPairRule)
             .filter(
                 (LearnedPairRule.symbol == symbol) | (LearnedPairRule.symbol == clean) | (LearnedPairRule.symbol == f"{clean}#"),
-                LearnedPairRule.status == "LIVE",
+                LearnedPairRule.status.in_(["LIVE", "LOCKED"]),
                 (LearnedPairRule.mode == mode.upper()) | (LearnedPairRule.mode == "BOTH"),
             )
             .all()

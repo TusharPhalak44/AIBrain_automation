@@ -704,3 +704,169 @@ def test_rest_endpoints_guardrails_and_assign():
     assert data_assign["status"] == "SUCCESS"
     assert data_assign["scalp_strategy_id"] == 1
     assert data_assign["scalp_enabled"] is True
+
+
+def test_saved_strategies_and_tested_pnl_vault(db_session):
+    """Test 11: Verify SavedStrategy model, default seed records, and REST endpoints."""
+    from backend.app.db.models import SavedStrategy
+    from backend.app.db.session import get_db
+
+    app = create_app(enable_lifespan_tasks=False)
+    app.dependency_overrides[get_db] = lambda: db_session
+    client = TestClient(app)
+
+    # 1. GET /api/ai-brain/saved-strategies
+    resp_list = client.get("/api/ai-brain/saved-strategies")
+    assert resp_list.status_code == 200
+    strats = resp_list.json()
+    assert len(strats) >= 4
+    first = strats[0]
+    assert "tested_net_pnl" in first
+    assert "profit_factor" in first
+    assert "win_rate_pct" in first
+    assert "total_r" in first
+    assert "max_drawdown_pct" in first
+    assert "is_active_live" in first
+
+    # 2. POST /api/ai-brain/saved-strategies (AST validation guard)
+    bad_code = "import os\nos.system('calc')"
+    resp_bad = client.post(
+        "/api/ai-brain/saved-strategies",
+        json={
+            "name": "Malicious Strategy",
+            "strategy_code": bad_code,
+            "mode": "SCALP",
+        },
+    )
+    assert resp_bad.status_code == 400
+    assert "AST Security validation failed" in resp_bad.json()["detail"]
+
+    # 3. POST /api/ai-brain/saved-strategies (Valid strategy)
+    good_code = '''DEFAULT_PARAMS = {"period": 14}
+def evaluate(df, params):
+    if len(df) < 20: return None
+    c = float(df["close"].iloc[-1])
+    return {"signal": "BUY", "mode": "SCALP", "entry": c, "sl": c - 2.0, "tp1": c + 3.0, "tp2": c + 6.0, "reason": "Test ok"}
+'''
+    resp_good = client.post(
+        "/api/ai-brain/saved-strategies",
+        json={
+            "name": "Test Verified FVG Scalp",
+            "strategy_code": good_code,
+            "mode": "SCALP",
+            "planning_tf": "M15",
+            "execution_tf": "M5",
+            "symbols": ["GOLD#", "BTCUSD#"],
+            "rules_summary": "Test automated scalp rule",
+            "tested_net_pnl": 350.50,
+            "profit_factor": 2.25,
+            "win_rate_pct": 65.0,
+            "total_r": 12.5,
+            "max_drawdown_pct": 3.9,
+            "sample_trades_count": 45,
+            "test_source": "BACKTEST_XM",
+        },
+    )
+    assert resp_good.status_code == 200
+    good_data = resp_good.json()
+    assert good_data["status"] == "SUCCESS"
+    saved_id = good_data["strategy"]["id"]
+
+    # 4. POST /api/ai-brain/saved-strategies/{id}/apply
+    resp_apply = client.post(
+        f"/api/ai-brain/saved-strategies/{saved_id}/apply",
+        json={"symbols": ["GOLD#", "BTCUSD#"], "mode": "SCALP"},
+    )
+    assert resp_apply.status_code == 200
+    apply_data = resp_apply.json()
+    assert apply_data["status"] == "SUCCESS"
+    assert "GOLD#" in apply_data["applied_pairs"] or "GOLD" in apply_data["applied_pairs"]
+
+    # Verify DB persistence
+    db_session.expire_all()
+    gold_bot = db_session.query(TradingPairBot).filter(
+        (TradingPairBot.symbol == "GOLD#") | (TradingPairBot.symbol == "GOLD")
+    ).first()
+    assert gold_bot is not None
+    assert gold_bot.scalp_strategy_id == apply_data["script_id"]
+    assert gold_bot.scalp_enabled is True
+
+    # 5. DELETE /api/ai-brain/saved-strategies/{id}
+    resp_del = client.delete(f"/api/ai-brain/saved-strategies/{saved_id}")
+    assert resp_del.status_code == 200
+    assert resp_del.json()["status"] == "SUCCESS"
+
+
+def test_swing_and_scalp_rule_enforcement_in_supervisor(db_session):
+    """Test 12: Verify get_active_rules strips # cleanly and swing_sig blocks when active rules match."""
+    from backend.app.db.models import LearnedPairRule
+    from backend.app.ai_brain.gemini_supervisor import gemini_supervisor
+    from backend.app.ai_brain.market_packet import MarketPacket
+
+    # Clean existing test rules for USDJPY
+    db_session.query(LearnedPairRule).filter(
+        LearnedPairRule.symbol.like("%USDJPY%")
+    ).delete(synchronize_session=False)
+    db_session.commit()
+
+    # Create active LIVE swing rule blocking BUY
+    rule = LearnedPairRule(
+        rule_code="TEST_SWING_BLOCK_USDJPY",
+        symbol="USDJPY#",
+        mode="SWING",
+        status="LIVE",
+        condition_json=json.dumps({"filter_action": "BLOCK_BUY", "indicator": "ema_trend"}),
+        action_json=json.dumps({"action": "WAIT"}),
+    )
+    db_session.add(rule)
+    db_session.commit()
+
+    # get_active_rules must find it querying 'USDJPY' or 'USDJPY#'
+    rules_with_hash = gemini_supervisor.get_active_rules("USDJPY#", db_session)
+    assert len(rules_with_hash) >= 1
+    assert any(r["rule_code"] == "TEST_SWING_BLOCK_USDJPY" for r in rules_with_hash)
+
+    rules_no_hash = gemini_supervisor.get_active_rules("USDJPY", db_session)
+    assert len(rules_no_hash) >= 1
+    assert any(r["rule_code"] == "TEST_SWING_BLOCK_USDJPY" for r in rules_no_hash)
+
+    # Test supervision fallback blocking swing BUY when higher-timeframe trend is opposite
+    packet = MarketPacket(
+        symbol="USDJPY#",
+        asset_class="FOREX",
+        timestamp_utc=now_utc().isoformat(),
+        timestamp_ist=to_ist_str(now_utc()),
+        bid=152.500,
+        ask=152.510,
+        spread_points=10,
+        pdh=153.000,
+        pdl=151.000,
+        swing_bias_h4_d1="BEARISH",  # Opposite to BUY
+        scalp_bias_m15_h1="CHOP",
+        timeframe_breakdown={},
+        candidate_signals={},
+        cross_pair_momentum={},
+        news_blackout={"is_blackout": False},
+    )
+
+    swing_sig = {
+        "strategy_id": 999,
+        "strategy_name": "Test Swing",
+        "signal": "BUY",
+        "mode": "SWING",
+        "entry": 152.500,
+        "sl": 151.500,
+        "tp1": 154.500,
+        "tp2": 156.000,
+        "reason": "Breakout",
+    }
+    packet.candidate_signals = {"swing_signal": swing_sig}
+
+    output = gemini_supervisor._fallback_deterministic_supervision(
+        packet=packet,
+        active_rules=rules_with_hash,
+    )
+
+    assert output.decision == "WAIT"
+    assert "Blocked by rule TEST_SWING_BLOCK_USDJPY" in output.trade_plan_thesis
+

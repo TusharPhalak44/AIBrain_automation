@@ -16,6 +16,7 @@ import {
   Trash2,
   UploadCloud,
   Check,
+  Zap,
 } from "lucide-react";
 import { fmtUsd, fmtPct, safeArr } from "../../utils/format";
 import { api } from "../../services/api";
@@ -53,6 +54,8 @@ export const StrategyLabTab: React.FC<StrategyLabTabProps> = ({
 
   // Saved Vault Leaderboard State
   const [savedVault, setSavedVault] = useState<any[]>([]);
+  const [savedStrategiesList, setSavedStrategiesList] = useState<any[]>([]);
+  const [deployingId, setDeployingId] = useState<number | null>(null);
   const [isSavingSnapshot, setIsSavingSnapshot] = useState(false);
   const [snapshotLabel, setSnapshotLabel] = useState("");
   const [showSaveModal, setShowSaveModal] = useState(false);
@@ -82,8 +85,12 @@ export const StrategyLabTab: React.FC<StrategyLabTabProps> = ({
 
   const fetchSavedVault = async () => {
     try {
-      const data = safeArr<any>(await api.strategies.getSavedVault());
-      setSavedVault(data);
+      const [vaultData, stratsData] = await Promise.all([
+        api.strategies.getSavedVault().catch(() => []),
+        api.aiBrain.getSavedStrategies().catch(() => []),
+      ]);
+      setSavedVault(safeArr<any>(vaultData));
+      setSavedStrategiesList(safeArr<any>(stratsData));
     } catch (e: any) {
       console.error("Failed to load saved vault:", e);
     }
@@ -198,23 +205,100 @@ export const StrategyLabTab: React.FC<StrategyLabTabProps> = ({
     if (!backtestResult) return;
     setIsSavingSnapshot(true);
     try {
+      const label = snapshotLabel || `${strategyName} [${backtestSymbol}]`;
+
+      // 1. Save to dedicated SavedStrategy vault table
+      try {
+        await api.aiBrain.createSavedStrategy({
+          name: label,
+          strategy_code: strategyCode,
+          mode: targetMode,
+          planning_tf: backtestTf,
+          execution_tf: backtestTf === "H4" ? "H1" : "M5",
+          symbols: [backtestSymbol],
+          rules_summary: `Empirical $100 backtest on ${backtestSymbol} (${backtestTf}) with ${backtestResult.total_trades} trades.`,
+          tested_net_pnl: backtestResult.net_pnl_usd,
+          profit_factor: backtestResult.profit_factor || 1.0,
+          win_rate_pct: backtestResult.win_rate_pct,
+          total_r: backtestResult.total_r || 0.0,
+          max_drawdown_pct: backtestResult.max_dd_pct,
+          sample_trades_count: backtestResult.total_trades,
+          test_source: "BACKTEST_XM",
+          is_active_live: false,
+        });
+      } catch (err) {
+        console.warn("Could not save to saved_strategies endpoint:", err);
+      }
+
+      // 2. Also save to BacktestRun snapshot for leaderboard table
       await api.strategies.saveSnapshot({
         backtest_run_id: backtestResult.backtest_run_id,
         strategy_id: selectedStrategyId || undefined,
-        custom_label: snapshotLabel || `${strategyName} [${backtestSymbol}]`,
+        custom_label: label,
         symbol: backtestResult.symbol,
         timeframe: backtestResult.timeframe,
         test_mode: backtestResult.test_mode,
         strategy_code: strategyCode,
         metrics: backtestResult,
       });
-      toast.success("Vault Snapshot Saved", `Strategy bookmarked into MySQL PnL Vault.`);
+
+      toast.success("Vault Snapshot Saved", `Strategy "${label}" bookmarked into MySQL PnL Vault.`);
       setShowSaveModal(false);
+      setSnapshotLabel("");
       await fetchSavedVault();
     } catch (e: any) {
       toast.error("Bookmark Failed", e.message || String(e));
     } finally {
       setIsSavingSnapshot(false);
+    }
+  };
+
+  const handleDeployToLive = async (item: any) => {
+    setDeployingId(item.id);
+    try {
+      const res = await api.aiBrain.applySavedStrategy(item.id);
+      toast.success(
+        "Deployed to Live Scanner",
+        `Strategy "${item.name}" deployed to live scanner across ${res.applied_pairs?.length || 0} symbols.`
+      );
+      await fetchSavedVault();
+    } catch (e: any) {
+      toast.error("Deploy Failed", e.message || String(e));
+    } finally {
+      setDeployingId(null);
+    }
+  };
+
+  const handleLoadVaultStrategy = (item: any) => {
+    const code = item.strategy_code || item.strategy_code_snapshot;
+    if (code) {
+      setStrategyCode(code);
+      setStrategyName(item.name || item.custom_label || "Loaded Strategy");
+      if (item.symbols && item.symbols.length > 0) {
+        setBacktestSymbol(item.symbols[0]);
+      } else if (item.symbol) {
+        setBacktestSymbol(item.symbol);
+      }
+      if (item.planning_tf) {
+        setBacktestTf(item.planning_tf);
+      } else if (item.timeframe) {
+        setBacktestTf(item.timeframe);
+      }
+      if (item.mode) {
+        setTargetMode(item.mode);
+      }
+      toast.success("Strategy Loaded", `Loaded "${item.name || item.custom_label}" into Python Editor.`);
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+  };
+
+  const handleDeleteSavedStrategy = async (id: number) => {
+    try {
+      await api.aiBrain.deleteSavedStrategy(id);
+      toast.info("Strategy Removed", `Strategy #${id} removed from vault.`);
+      await fetchSavedVault();
+    } catch (e: any) {
+      toast.error("Delete Failed", e.message || String(e));
     }
   };
 
@@ -671,24 +755,149 @@ export const StrategyLabTab: React.FC<StrategyLabTabProps> = ({
       )}
 
       {/* Bottom Section: Saved Strategies & Tested PnL Vault (Leaderboard Table) */}
-      <div className="bg-[#121824] border border-slate-800 rounded-xl p-4 space-y-3">
+      <div className="bg-[#121824] border border-slate-800 rounded-xl p-4 space-y-4">
         <div className="flex items-center justify-between border-b border-slate-800 pb-3">
           <div className="flex items-center gap-2">
             <Trophy className="w-5 h-5 text-amber-400" />
             <div>
               <h3 className="font-bold text-white text-sm">SAVED STRATEGIES & TESTED PNL VAULT</h3>
               <p className="text-[11px] text-slate-400">
-                Persistent MySQL Leaderboard ({savedVault.length} Saved Snapshots). Rank, compare, and assign profitable strategies to live bots.
+                Persistent MySQL Leaderboard ({savedStrategiesList.length} Verified Strategies | {savedVault.length} Snapshots). Rank, compare empirical scorecards, and deploy directly to live scanner bots.
               </p>
             </div>
           </div>
           <button
             onClick={fetchSavedVault}
-            className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded-lg"
+            className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded-lg transition"
           >
             Refresh Vault
           </button>
         </div>
+
+        {/* Institutional Strategy Cards Grid */}
+        {savedStrategiesList.length > 0 && (
+          <div className="space-y-2">
+            <div className="text-[11px] font-mono font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+              <span>Verified Institutional Strategies</span>
+              <span className="text-slate-600">({savedStrategiesList.length})</span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+              {savedStrategiesList.map((item) => {
+                const isPositive = (item.tested_net_pnl || 0) >= 0;
+                return (
+                  <div
+                    key={item.id}
+                    className="bg-[#0a0f18] border border-slate-800/80 hover:border-slate-700 rounded-xl p-3 flex flex-col justify-between shadow-lg relative group transition"
+                  >
+                    <div>
+                      {/* Header: Title + Mode + Live Badge */}
+                      <div className="flex items-start justify-between gap-2 mb-2">
+                        <div className="min-w-0">
+                          <h4 className="font-bold text-white text-xs leading-snug truncate" title={item.name}>
+                            {item.name}
+                          </h4>
+                          <div className="flex items-center gap-1.5 mt-1">
+                            <span className={`px-1.5 py-0.5 text-[9px] font-mono font-bold rounded uppercase ${
+                              item.mode === "SCALP"
+                                ? "bg-amber-950/80 text-amber-300 border border-amber-800/60"
+                                : item.mode === "SWING"
+                                ? "bg-purple-950/80 text-purple-300 border border-purple-800/60"
+                                : "bg-blue-950/80 text-blue-300 border border-blue-800/60"
+                            }`}>
+                              {item.mode}
+                            </span>
+                            <span className="text-[10px] text-slate-500 font-mono">
+                              {item.planning_tf} → {item.execution_tf}
+                            </span>
+                          </div>
+                        </div>
+
+                        {item.is_active_live && (
+                          <span className="flex items-center gap-1 px-1.5 py-0.5 bg-emerald-950/80 border border-emerald-700/80 text-emerald-300 text-[9px] font-mono font-bold rounded shrink-0">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                            <span>LIVE</span>
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Target Symbols Badges */}
+                      {item.symbols && item.symbols.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mb-2.5">
+                          {item.symbols.slice(0, 4).map((s: string) => (
+                            <span key={s} className="px-1 py-0.2 bg-slate-900 border border-slate-800 text-slate-300 text-[9px] font-mono rounded">
+                              {s}
+                            </span>
+                          ))}
+                          {item.symbols.length > 4 && (
+                            <span className="text-[9px] text-slate-500 font-mono self-center">
+                              +{item.symbols.length - 4}
+                            </span>
+                          )}
+                        </div>
+                      )}
+
+                      {/* 4-Metric Scorecard Grid */}
+                      <div className="grid grid-cols-2 gap-1.5 bg-slate-900/60 rounded-lg p-2 border border-slate-800/60 font-mono text-[11px] mb-3">
+                        <div>
+                          <div className="text-[9px] text-slate-500 uppercase">Tested Net PnL</div>
+                          <div className={`font-bold ${isPositive ? "text-emerald-400" : "text-rose-400"}`}>
+                            {fmtUsd(item.tested_net_pnl, true)}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[9px] text-slate-500 uppercase">Profit Factor</div>
+                          <div className="font-bold text-cyan-300">
+                            {Number(item.profit_factor).toFixed(2)}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[9px] text-slate-500 uppercase">Win Rate</div>
+                          <div className="font-bold text-slate-200">
+                            {fmtPct(item.win_rate_pct)}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[9px] text-slate-500 uppercase">Max DD / R</div>
+                          <div className="font-bold text-slate-300 text-[10px]">
+                            <span className="text-rose-400">{fmtPct(item.max_drawdown_pct)}</span>
+                            <span className="text-slate-600 mx-1">|</span>
+                            <span className="text-emerald-400">+{Number(item.total_r).toFixed(1)}R</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Actions */}
+                    <div className="flex items-center gap-1.5 pt-2 border-t border-slate-800/80">
+                      <button
+                        onClick={() => handleDeployToLive(item)}
+                        disabled={deployingId === item.id}
+                        className="flex-1 py-1 px-2 bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-bold rounded transition flex items-center justify-center gap-1 disabled:opacity-50"
+                      >
+                        <Zap className="w-3 h-3" />
+                        <span>{deployingId === item.id ? "Deploying..." : "Deploy Live"}</span>
+                      </button>
+                      <button
+                        onClick={() => handleLoadVaultStrategy(item)}
+                        className="py-1 px-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-[10px] font-bold rounded transition"
+                        title="Load into Python Editor"
+                      >
+                        Load Lab
+                      </button>
+                      <button
+                        onClick={() => handleDeleteSavedStrategy(item.id)}
+                        className="p-1 hover:text-rose-400 text-slate-500 transition rounded"
+                        title="Delete from Vault"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {savedVault.length === 0 ? (
           <div className="text-slate-500 text-xs py-8 text-center">

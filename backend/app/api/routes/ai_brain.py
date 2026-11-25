@@ -20,6 +20,8 @@ from backend.app.db.models import (
     TradeLedger,
     LearnedPairRule,
     PairPatternMemory,
+    SavedStrategy,
+    StrategyScript,
 )
 from backend.app.ai_brain.scheduler import scheduler
 from backend.app.ai_brain.news_guard import news_guard
@@ -32,6 +34,7 @@ from backend.app.mt5_bridge.connector import mt5_connector
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ai", tags=["Gemini Supervisory Brain"])
+brain_router = APIRouter(prefix="/ai-brain", tags=["Gemini Supervisory Brain (/ai-brain alias)"])
 
 
 # Pydantic Schemas
@@ -94,7 +97,10 @@ def list_ai_reports(
 
 
 @router.get("/upcoming-setups")
-async def get_upcoming_setups(db: Session = Depends(get_db)):
+@brain_router.get("/upcoming-setups")
+@router.get("/radar")
+@brain_router.get("/radar")
+def get_upcoming_setups(db: Session = Depends(get_db)):
     """
     Return active upcoming setups across all pairs with live tick distance calculations.
     Splits into:
@@ -117,6 +123,8 @@ async def get_upcoming_setups(db: Session = Depends(get_db)):
     for t in planned_trades:
         pair_bot = db.query(TradingPairBot).filter_by(symbol=t.symbol).first()
         digits = pair_bot.digits if pair_bot else 2
+        max_spread_pts = pair_bot.max_spread_points if pair_bot else 35
+        zone_pad = float(max_spread_pts) * (10 ** -digits) * 0.5
 
         cur_price = float(t.entry_price)
         dist_pts = 0
@@ -124,8 +132,10 @@ async def get_upcoming_setups(db: Session = Depends(get_db)):
 
         if mt5_connector.is_connected:
             import MetaTrader5 as mt5
+            from backend.app.core.instruments import resolve_marketwatch_symbol
             try:
-                tick = mt5.symbol_info_tick(t.symbol)
+                mw_sym = resolve_marketwatch_symbol(t.symbol)
+                tick = mt5.symbol_info_tick(mw_sym) or mt5.symbol_info_tick(t.symbol)
                 if tick:
                     cur_price = tick.ask if t.direction == "BUY" else tick.bid
                     if t.direction == "BUY":
@@ -136,8 +146,12 @@ async def get_upcoming_setups(db: Session = Depends(get_db)):
             except Exception:
                 pass
 
-        sl_dist = abs(float(t.entry_price) - float(t.sl))
-        tp_dist = abs(float(t.tp2) - float(t.entry_price))
+        entry_f = float(t.entry_price)
+        sl_f = float(t.sl)
+        tp1_f = float(t.tp1)
+        tp2_f = float(t.tp2)
+        sl_dist = abs(entry_f - sl_f)
+        tp_dist = abs(tp2_f - entry_f)
         rr = round(tp_dist / max(0.0001, sl_dist), 2)
 
         actionable.append({
@@ -147,17 +161,26 @@ async def get_upcoming_setups(db: Session = Depends(get_db)):
             "asset_class": getattr(pair_bot, "asset_class", "COMMODITIES") if pair_bot else "COMMODITIES",
             "direction": t.direction,
             "mode": t.mode,
+            "setup_mode": t.mode,
             "trade_style": t.mode,
+            "digits": digits,
             "lots": float(t.lots),
-            "entry_price": float(t.entry_price),
-            "sl": float(t.sl),
-            "tp1": float(t.tp1),
-            "tp2": float(t.tp2),
+            "entry_price": entry_f,
+            "planned_entry": entry_f,
+            "trigger_price": entry_f,
+            "trigger_zone_low": round(entry_f - zone_pad, digits),
+            "trigger_zone_high": round(entry_f + zone_pad, digits),
+            "sl": sl_f,
+            "planned_sl": sl_f,
+            "tp1": tp1_f,
+            "planned_tp1": tp1_f,
+            "tp2": tp2_f,
+            "planned_tp2": tp2_f,
             "rr_ratio": rr,
             "projected_rr": rr,
             "current_price": cur_price,
             "distance_points": dist_pts,
-            "distance_pips_or_pct": round(abs(cur_price - float(t.entry_price)), digits),
+            "distance_pips_or_pct": round(abs(cur_price - entry_f), digits),
             "in_trigger_zone": in_zone,
             "status": "READY_TO_EXECUTE" if in_zone else ("APPROACHING" if abs(dist_pts) <= 25 else "DEVELOPING"),
             "readiness_pct": 95 if in_zone else 80,
@@ -516,11 +539,53 @@ class RuleStatusSchema(BaseModel):
     status: str = Field(..., description="LIVE, CANDIDATE, LOCKED, RETIRED, DEPRECATED")
 
 
+def _serialize_rules(rules: List[LearnedPairRule]) -> List[dict]:
+    res = []
+    for r in rules:
+        cond = json.loads(r.condition_json) if r.condition_json else {}
+        act = json.loads(r.action_json) if r.action_json else {}
+        origin_ids = json.loads(r.origin_loss_ids_json) if r.origin_loss_ids_json else []
+        reason = act.get("reason") or cond.get("reason") or f"Blocks trade setups on {r.symbol} matching previous stop-loss fingerprint."
+        category = "NEWS" if "NEWS" in r.rule_code else ("LIQU" if "LIQU" in r.rule_code else ("COUN" if "COUN" in r.rule_code else "REGI"))
+        res.append({
+            "id": r.id,
+            "rule_code": r.rule_code,
+            "symbol": r.symbol,
+            "mode": r.mode,
+            "status": r.status,
+            "condition": cond,
+            "action": act,
+            "failure_reason": reason,
+            "rule_description": reason,
+            "category": category,
+            "origin_loss_ids": origin_ids,
+            "backtest_net_improvement_pct": float(r.backtest_net_improvement_pct or 0.0),
+            "profit_factor_before": float(getattr(r, "profit_factor_before", 0.0) or 0.0),
+            "profit_factor_after": float(getattr(r, "profit_factor_after", 0.0) or 0.0),
+            "shadow_pf_before": float(getattr(r, "profit_factor_before", 0.0) or 0.0),
+            "shadow_pf_after": float(getattr(r, "profit_factor_after", 0.0) or 0.0),
+            "net_r_delta": float(getattr(r, "net_r_delta", 0.0) or 0.0),
+            "net_r_saved": float(getattr(r, "net_r_delta", 0.0) or 0.0),
+            "winners_preserved_pct": float(getattr(r, "winners_preserved_pct", 100.0) or 100.0),
+            "winners_kept_pct": float(getattr(r, "winners_preserved_pct", 100.0) or 100.0),
+            "avoided_losses_usd": float(getattr(r, "avoided_losses_usd", 0.0) or 0.0),
+            "loss_avoided_usd": float(getattr(r, "avoided_losses_usd", 0.0) or 0.0),
+            "trigger_count": int(getattr(r, "trigger_count", 0) or 0),
+            "recent_profit_factor": float(getattr(r, "recent_profit_factor", 0.0) or 0.0),
+            "shadow_scorecard": json.loads(r.shadow_scorecard_json) if getattr(r, "shadow_scorecard_json", None) else None,
+            "created_at": r.created_at_utc.isoformat() if r.created_at_utc else "",
+            "created_at_utc": r.created_at_utc.isoformat() if r.created_at_utc else "",
+            "created_at_ist": to_ist_str(r.created_at_utc) if r.created_at_utc else "",
+        })
+    return res
+
+
 @router.get("/rules")
 def list_learned_rules(
     symbol: Optional[str] = None,
     status: Optional[str] = None,
     mode: Optional[str] = None,
+    as_dict: bool = False,
     db: Session = Depends(get_db),
 ):
     """List self-learned JSON filter rules produced by post-mortem forensics."""
@@ -539,36 +604,60 @@ def list_learned_rules(
         query = query.filter_by(mode=mode.upper())
 
     rules = query.order_by(LearnedPairRule.created_at_utc.desc()).all()
-    res = []
-    for r in rules:
-        cond = json.loads(r.condition_json) if r.condition_json else {}
-        act = json.loads(r.action_json) if r.action_json else {}
-        origin_ids = json.loads(r.origin_loss_ids_json) if r.origin_loss_ids_json else []
-        res.append({
-            "id": r.id,
-            "rule_code": r.rule_code,
-            "symbol": r.symbol,
-            "mode": r.mode,
-            "status": r.status,
-            "condition": cond,
-            "action": act,
-            "origin_loss_ids": origin_ids,
-            "backtest_net_improvement_pct": float(r.backtest_net_improvement_pct),
-            "profit_factor_before": float(getattr(r, "profit_factor_before", 0.0) or 0.0),
-            "profit_factor_after": float(getattr(r, "profit_factor_after", 0.0) or 0.0),
-            "net_r_delta": float(getattr(r, "net_r_delta", 0.0) or 0.0),
-            "winners_preserved_pct": float(getattr(r, "winners_preserved_pct", 100.0) or 100.0),
-            "avoided_losses_usd": float(getattr(r, "avoided_losses_usd", 0.0) or 0.0),
-            "trigger_count": int(getattr(r, "trigger_count", 0) or 0),
-            "recent_profit_factor": float(getattr(r, "recent_profit_factor", 0.0) or 0.0),
-            "shadow_scorecard": json.loads(r.shadow_scorecard_json) if getattr(r, "shadow_scorecard_json", None) else None,
-            "created_at_utc": r.created_at_utc.isoformat(),
-            "created_at_ist": to_ist_str(r.created_at_utc),
-        })
+    res = _serialize_rules(rules)
+    if as_dict:
+        return {
+            "rules": res,
+            "live_count": sum(1 for r in res if r["status"] == "LIVE"),
+            "locked_count": sum(1 for r in res if r["status"] == "LOCKED"),
+            "candidate_count": sum(1 for r in res if r["status"] == "CANDIDATE"),
+            "retired_count": sum(1 for r in res if r["status"] in ("RETIRED", "DEPRECATED")),
+            "deprecated_count": sum(1 for r in res if r["status"] == "DEPRECATED"),
+            "total_count": len(res),
+        }
     return res
 
 
+@brain_router.get("/rules")
+def list_learned_rules_vault(
+    symbol: Optional[str] = None,
+    status: Optional[str] = None,
+    mode: Optional[str] = None,
+    as_list: bool = False,
+    db: Session = Depends(get_db),
+):
+    """Vault endpoint returning serialized rules + live aggregate status counters."""
+    query = db.query(LearnedPairRule)
+    if symbol:
+        resolved = resolve_broker_symbol(symbol, db)
+        clean = resolved.rstrip("#")
+        query = query.filter(
+            (LearnedPairRule.symbol == resolved)
+            | (LearnedPairRule.symbol == clean)
+            | (LearnedPairRule.symbol == f"{clean}#")
+        )
+    if status:
+        query = query.filter_by(status=status.upper())
+    if mode:
+        query = query.filter_by(mode=mode.upper())
+
+    rules = query.order_by(LearnedPairRule.created_at_utc.desc()).all()
+    res = _serialize_rules(rules)
+    if as_list:
+        return res
+    return {
+        "rules": res,
+        "live_count": sum(1 for r in res if r["status"] == "LIVE"),
+        "locked_count": sum(1 for r in res if r["status"] == "LOCKED"),
+        "candidate_count": sum(1 for r in res if r["status"] == "CANDIDATE"),
+        "retired_count": sum(1 for r in res if r["status"] in ("RETIRED", "DEPRECATED")),
+        "deprecated_count": sum(1 for r in res if r["status"] == "DEPRECATED"),
+        "total_count": len(res),
+    }
+
+
 @router.post("/rules/{rule_id}/status")
+@brain_router.post("/rules/{rule_id}/status")
 def update_rule_status(
     rule_id: int,
     payload: RuleStatusSchema,
@@ -594,6 +683,56 @@ def update_rule_status(
         "rule_id": rule.id,
         "rule_code": rule.rule_code,
         "new_status": rule.status,
+    }
+
+
+@router.delete("/rules/{rule_id}")
+@brain_router.delete("/rules/{rule_id}")
+def delete_learned_rule(rule_id: int, db: Session = Depends(get_db)):
+    """Permanently delete/remove a self-learned rule from the vault."""
+    rule = db.query(LearnedPairRule).filter_by(id=rule_id).first()
+    if not rule:
+        raise HTTPException(status_code=404, detail=f"LearnedPairRule #{rule_id} not found")
+    code = rule.rule_code
+    db.delete(rule)
+    db.commit()
+    return {
+        "status": "SUCCESS",
+        "rule_id": rule_id,
+        "rule_code": code,
+        "message": f"Rule {code} permanently removed from vault.",
+    }
+
+
+@router.post("/circuit-breaker/reset")
+@brain_router.post("/circuit-breaker/reset")
+def reset_circuit_breaker(db: Session = Depends(get_db)):
+    """Manually reset and clear the Daily Drawdown Circuit Breaker to resume autonomous trading."""
+    prev_reason = scheduler.circuit_breaker_reason
+    scheduler.circuit_breaker_tripped = False
+    scheduler.circuit_breaker_until_utc = None
+    scheduler.circuit_breaker_reason = None
+
+    try:
+        import asyncio
+        from backend.app.ai_brain.telegram_notifier import telegram_notifier
+        loop = asyncio.get_running_loop()
+        loop.create_task(
+            telegram_notifier.notify_system_guardrail(
+                alert_type="CIRCUIT_BREAKER_RESET",
+                title="Circuit Breaker Manually Cleared",
+                details=f"Trader manually reset circuit breaker. Previous halt reason: {prev_reason or 'Daily Limit'}. Autonomous scanning and execution resumed.",
+                action_taken="Scanning and Execution Unpaused",
+                severity="INFO",
+            )
+        )
+    except Exception as te:
+        logger.debug(f"Circuit breaker reset notification note: {te}")
+
+    return {
+        "status": "SUCCESS",
+        "message": "Circuit Breaker manually reset. Autonomous trade scanning and execution active.",
+        "guardrail_status": scheduler.get_guardrail_status(db),
     }
 
 
@@ -754,8 +893,7 @@ def update_cache_config(payload: CacheConfigSchema, db: Session = Depends(get_db
     return {"status": "SUCCESS", "config": updated}
 
 
-# Alias router for /api/ai-brain/*
-brain_router = APIRouter(prefix="/ai-brain", tags=["Gemini Supervisory Brain (/ai-brain alias)"])
+# Endpoints attached to brain_router (/api/ai-brain/*)
 
 @brain_router.get("/cache/status")
 def get_cache_status_alias(db: Session = Depends(get_db)):
@@ -895,6 +1033,10 @@ def trigger_mt5_reconciliation(db: Session = Depends(get_db)):
 
 @router.get("/risk-guardrails")
 @brain_router.get("/risk-guardrails")
+@router.get("/guardrails")
+@brain_router.get("/guardrails")
+@router.get("/status")
+@brain_router.get("/status")
 def get_risk_guardrails(db: Session = Depends(get_db)):
     """Fetch live risk guardrail metrics, portfolio limits, circuit breaker, and cooldown timers."""
     return scheduler.get_guardrail_status(db)
@@ -988,7 +1130,9 @@ def update_telegram_config(payload: TelegramConfigUpdateSchema, db: Session = De
     if payload.bot_username is not None:
         st.telegram_bot_username = payload.bot_username.strip()
     if payload.admin_chat_id is not None:
-        st.telegram_admin_chat_id = payload.admin_chat_id.strip()
+        clean_chat = payload.admin_chat_id.strip()
+        if clean_chat:
+            st.telegram_admin_chat_id = clean_chat
     if payload.thread_id is not None:
         st.telegram_thread_id = payload.thread_id.strip() or None
     if payload.notify_pre_trigger is not None:
@@ -1013,6 +1157,8 @@ def update_telegram_config(payload: TelegramConfigUpdateSchema, db: Session = De
 @brain_router.post("/telegram/test")
 async def send_telegram_test_preview(payload: TelegramTestSchema, db: Session = Depends(get_db)):
     """Send live preview of an institutional HTML Telegram alert template."""
+    import random
+    import time
     from backend.app.ai_brain.telegram_notifier import telegram_notifier
 
     t_type = payload.template_type.upper()
@@ -1031,9 +1177,16 @@ async def send_telegram_test_preview(payload: TelegramTestSchema, db: Session = 
             detail="Telegram Chat ID is not configured. Please save a chat ID or register as admin.",
         )
 
-    # Temporarily override chat_id if provided specifically for test
-    if payload.chat_id:
-        cfg["chat_id"] = payload.chat_id
+    # Dynamic test ticket and price offsets to avoid collisions
+    dynamic_ticket = int(time.time() * 10) % 90000000 + 10000000
+    jitter = round(random.uniform(-3.0, 3.0), 2)
+
+    common_kwargs = {
+        "bypass_dedup": True,
+        "bypass_category_check": True,
+        "force_send": True,
+        "override_chat_id": target_chat,
+    }
 
     ok = False
     try:
@@ -1042,8 +1195,8 @@ async def send_telegram_test_preview(payload: TelegramTestSchema, db: Session = 
                 symbol=sym,
                 trade_style="SCALP",
                 direction="BUY",
-                trigger_zone_price=2645.50,
-                invalidation_price=2638.00,
+                trigger_zone_price=2645.50 + jitter,
+                invalidation_price=2638.00 + jitter,
                 trigger_condition="Asian Low Sweep & M5 Bullish FVG Inversion Close",
                 readiness_pct=85,
                 time_to_trigger_est="15-30m",
@@ -1055,18 +1208,19 @@ async def send_telegram_test_preview(payload: TelegramTestSchema, db: Session = 
                 ],
                 thesis="Institutional liquidity grab below 2640. Expecting explosive expansion toward London High.",
                 silent=False,
+                **common_kwargs,
             )
         elif t_type == "EXECUTION":
             ok = await telegram_notifier.notify_trade_executed(
-                ticket=98124012,
+                ticket=dynamic_ticket,
                 symbol=sym,
                 mode="SCALP",
                 direction="BUY",
                 lots=0.15,
-                entry_price=2648.20,
-                sl=2642.50,
-                tp1=2656.75,
-                tp2=2668.50,
+                entry_price=2648.20 + jitter,
+                sl=2642.50 + jitter,
+                tp1=2656.75 + jitter,
+                tp2=2668.50 + jitter,
                 cash_risk=85.50,
                 risk_pct=0.50,
                 spread_points=12,
@@ -1080,49 +1234,53 @@ async def send_telegram_test_preview(payload: TelegramTestSchema, db: Session = 
                     "G5_spread_session": True,
                 },
                 ai_summary="Displacement candle confirmed off H1 demand block. Risk strictly capped at 0.50%.",
+                **common_kwargs,
             )
         elif t_type == "LIMIT":
             ok = await telegram_notifier.notify_limit_filled_or_expired(
-                ticket=98124012,
+                ticket=dynamic_ticket,
                 symbol=sym,
                 direction="BUY",
                 action="FILLED",
-                fill_price=2645.50,
+                fill_price=2645.50 + jitter,
                 lots=0.15,
-                sl=2640.00,
-                tp1=2653.75,
-                tp2=2665.00,
+                sl=2640.00 + jitter,
+                tp1=2653.75 + jitter,
+                tp2=2665.00 + jitter,
+                **common_kwargs,
             )
         elif t_type == "BE":
             ok = await telegram_notifier.notify_breakeven_locked(
-                ticket=98124012,
+                ticket=dynamic_ticket,
                 symbol=sym,
                 direction="BUY",
-                entry_price=2648.20,
-                new_sl=2648.50,
+                entry_price=2648.20 + jitter,
+                new_sl=2648.50 + jitter,
                 current_r=1.05,
-                next_target=2656.75,
+                next_target=2656.75 + jitter,
+                **common_kwargs,
             )
         elif t_type == "TP1":
             ok = await telegram_notifier.notify_partial_tp1(
-                ticket=98124012,
+                ticket=dynamic_ticket,
                 symbol=sym,
                 direction="BUY",
                 volume_closed=0.09,
                 remaining_volume=0.06,
                 realized_pnl=76.95,
-                trailed_sl=2648.50,
-                tp2=2668.50,
+                trailed_sl=2648.50 + jitter,
+                tp2=2668.50 + jitter,
                 current_r=1.50,
+                **common_kwargs,
             )
         elif t_type == "CLOSE":
             ok = await telegram_notifier.notify_trade_closed(
-                ticket=98124012,
+                ticket=dynamic_ticket,
                 symbol=sym,
                 mode="SCALP",
                 direction="BUY",
-                entry_price=2648.20,
-                exit_price=2668.50,
+                entry_price=2648.20 + jitter,
+                exit_price=2668.50 + jitter,
                 gross_pnl=304.50,
                 commission=0.00,
                 swap=-2.15,
@@ -1132,6 +1290,7 @@ async def send_telegram_test_preview(payload: TelegramTestSchema, db: Session = 
                 hold_duration_str="1h 14m",
                 prior_partial_pnl=76.95,
                 today_scorecard={"wins": 4, "losses": 1, "net_pnl": 412.80, "open_positions": 2},
+                **common_kwargs,
             )
         elif t_type == "GUARDRAIL":
             ok = await telegram_notifier.notify_system_guardrail(
@@ -1140,6 +1299,7 @@ async def send_telegram_test_preview(payload: TelegramTestSchema, db: Session = 
                 details="Account daily drawdown touched -$312.40 (-3.12%). All autonomous scanning paused until 00:05 UTC next session.",
                 action_taken="Autonomous Order Entry HALTED",
                 severity="CRITICAL",
+                **common_kwargs,
             )
         else:
             raise HTTPException(status_code=400, detail=f"Unknown template_type: {t_type}")
@@ -1150,10 +1310,9 @@ async def send_telegram_test_preview(payload: TelegramTestSchema, db: Session = 
         raise HTTPException(status_code=500, detail=f"Telegram test failed: {str(e)}")
 
     if not ok:
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to deliver Telegram message. Check bot token, chat ID permissions, or network connectivity.",
-        )
+        last_err = telegram_notifier.get_last_error()
+        err_msg = f"Failed to deliver Telegram message: {last_err}" if last_err else "Failed to deliver Telegram message. Check bot token, chat ID permissions, or network connectivity."
+        raise HTTPException(status_code=500, detail=err_msg)
 
     return {
         "status": "SUCCESS",
@@ -1161,6 +1320,228 @@ async def send_telegram_test_preview(payload: TelegramTestSchema, db: Session = 
         "symbol": sym,
         "message": f"Successfully delivered institutional {t_type} alert preview to Telegram.",
     }
+
+
+# =========================================================================
+# SAVED STRATEGIES & TESTED PNL VAULT (Empirical Scorecard Store)
+# =========================================================================
+
+class SavedStrategyCreateSchema(BaseModel):
+    name: str = Field(..., max_length=128)
+    strategy_code: str
+    mode: str = Field("SCALP", max_length=16)  # SCALP, SWING, BOTH
+    planning_tf: str = Field("M15", max_length=16)
+    execution_tf: str = Field("M5", max_length=16)
+    symbols: Optional[List[str]] = None
+    rules_summary: Optional[str] = None
+    prompt_template: Optional[str] = None
+    tested_net_pnl: float = 0.0
+    profit_factor: float = 1.0
+    win_rate_pct: float = 50.0
+    total_r: float = 0.0
+    max_drawdown_pct: float = 0.0
+    sample_trades_count: int = 0
+    test_source: str = "BACKTEST_XM"
+    is_active_live: bool = False
+
+
+class SavedStrategyApplySchema(BaseModel):
+    symbols: Optional[List[str]] = None
+    mode: Optional[str] = None
+
+
+def _serialize_saved_strategy(s: SavedStrategy) -> Dict[str, Any]:
+    symbols_list = []
+    if s.symbols_json:
+        try:
+            symbols_list = json.loads(s.symbols_json)
+        except Exception:
+            symbols_list = [s.symbols_json]
+    return {
+        "id": s.id,
+        "name": s.name,
+        "strategy_code": s.strategy_code,
+        "mode": s.mode,
+        "planning_tf": s.planning_tf,
+        "execution_tf": s.execution_tf,
+        "symbols": symbols_list,
+        "rules_summary": s.rules_summary or "",
+        "prompt_template": s.prompt_template or "",
+        "tested_net_pnl": float(s.tested_net_pnl),
+        "profit_factor": float(s.profit_factor),
+        "win_rate_pct": float(s.win_rate_pct),
+        "total_r": float(s.total_r),
+        "max_drawdown_pct": float(s.max_drawdown_pct),
+        "sample_trades_count": s.sample_trades_count,
+        "test_source": s.test_source,
+        "tested_at_ist": to_ist_str(s.tested_at_utc),
+        "is_active_live": bool(s.is_active_live),
+        "created_at_ist": to_ist_str(s.created_at_utc),
+    }
+
+
+@brain_router.get("/saved-strategies")
+@router.get("/saved-strategies")
+def list_saved_strategies(db: Session = Depends(get_db)):
+    """List all saved empirical strategies in the Tested PnL Vault."""
+    strategies = db.query(SavedStrategy).order_by(SavedStrategy.tested_net_pnl.desc()).all()
+    return [_serialize_saved_strategy(s) for s in strategies]
+
+
+@brain_router.post("/saved-strategies")
+@router.post("/saved-strategies")
+def create_saved_strategy(payload: SavedStrategyCreateSchema, db: Session = Depends(get_db)):
+    """Save/bookmark strategy with verified empirical backtest metrics into vault."""
+    from backend.app.strategy_lab.sandbox import validate_strategy_ast
+
+    is_valid, err_msg, _ = validate_strategy_ast(payload.strategy_code)
+    if not is_valid:
+        raise HTTPException(status_code=400, detail=f"AST Security validation failed: {err_msg}")
+
+    symbols_json = json.dumps(payload.symbols or ["EURUSD#", "GOLD#", "OILCash#", "BTCUSD#", "ETHUSD#"])
+
+    record = SavedStrategy(
+        name=payload.name,
+        strategy_code=payload.strategy_code,
+        mode=payload.mode.upper(),
+        planning_tf=payload.planning_tf,
+        execution_tf=payload.execution_tf,
+        symbols_json=symbols_json,
+        rules_summary=payload.rules_summary,
+        prompt_template=payload.prompt_template,
+        tested_net_pnl=Decimal(str(payload.tested_net_pnl)),
+        profit_factor=Decimal(str(payload.profit_factor)),
+        win_rate_pct=Decimal(str(payload.win_rate_pct)),
+        total_r=Decimal(str(payload.total_r)),
+        max_drawdown_pct=Decimal(str(payload.max_drawdown_pct)),
+        sample_trades_count=payload.sample_trades_count,
+        test_source=payload.test_source,
+        is_active_live=payload.is_active_live,
+        created_at_utc=now_utc(),
+        tested_at_utc=now_utc(),
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+
+    return {
+        "status": "SUCCESS",
+        "message": f"Strategy '{record.name}' saved to Tested PnL Vault.",
+        "strategy": _serialize_saved_strategy(record),
+    }
+
+
+@brain_router.post("/saved-strategies/{strategy_id}/apply")
+@router.post("/saved-strategies/{strategy_id}/apply")
+def apply_saved_strategy(
+    strategy_id: int,
+    payload: Optional[SavedStrategyApplySchema] = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Deploy saved strategy to live scanner for its configured or requested symbols.
+    Links strategy to TradingPairBot in MySQL and activates multi-timeframe scanning.
+    """
+    saved = db.query(SavedStrategy).filter_by(id=strategy_id).first()
+    if not saved:
+        raise HTTPException(status_code=404, detail=f"SavedStrategy #{strategy_id} not found in vault")
+
+    # 1. Sync or create corresponding StrategyScript
+    script = db.query(StrategyScript).filter_by(name=saved.name).first()
+    if not script:
+        script = StrategyScript(
+            name=saved.name,
+            description=saved.rules_summary or f"Empirical strategy imported from Vault #{saved.id}",
+            target_mode=saved.mode,
+            python_code=saved.strategy_code,
+            default_params_json="{}",
+            is_builtin=False,
+            created_at_utc=now_utc(),
+        )
+        db.add(script)
+        db.commit()
+        db.refresh(script)
+    else:
+        script.python_code = saved.strategy_code
+        script.target_mode = saved.mode
+        db.commit()
+
+    # 2. Determine target symbols
+    target_symbols = []
+    if payload and payload.symbols:
+        target_symbols = payload.symbols
+    elif saved.symbols_json:
+        try:
+            target_symbols = json.loads(saved.symbols_json)
+        except Exception:
+            target_symbols = [saved.symbols_json]
+
+    if not target_symbols:
+        target_symbols = ["EURUSD#", "GOLD#", "OILCash#", "BTCUSD#", "ETHUSD#"]
+
+    mode_to_apply = (payload.mode if payload and payload.mode else saved.mode).upper()
+
+    applied_pairs = []
+    for sym in target_symbols:
+        clean = sym.rstrip("#")
+        pair = (
+            db.query(TradingPairBot)
+            .filter((TradingPairBot.symbol == sym) | (TradingPairBot.symbol == clean) | (TradingPairBot.symbol == f"{clean}#"))
+            .first()
+        )
+        if pair:
+            if mode_to_apply in ("SCALP", "BOTH"):
+                pair.scalp_strategy_id = script.id
+                pair.scalp_enabled = True
+            if mode_to_apply in ("SWING", "BOTH"):
+                pair.swing_strategy_id = script.id
+                pair.swing_enabled = True
+            applied_pairs.append(pair.symbol)
+
+    # 3. Update AppSettings scanner timeframes
+    app_settings = db.query(AppSettings).filter_by(id=1).first()
+    if app_settings:
+        if mode_to_apply in ("SCALP", "BOTH"):
+            app_settings.scalp_planning_tf = saved.planning_tf
+            app_settings.scalp_execution_tf = saved.execution_tf
+        if mode_to_apply in ("SWING", "BOTH"):
+            app_settings.swing_planning_tf = saved.planning_tf
+            app_settings.swing_execution_tf = saved.execution_tf
+
+    # 4. Set is_active_live
+    saved.is_active_live = True
+    db.commit()
+
+    # 5. Purge stale scanner cache
+    try:
+        cache_manager.clear_all()
+    except Exception as e:
+        logger.debug(f"Cache purge on strategy apply: {e}")
+
+    return {
+        "status": "SUCCESS",
+        "message": f"Strategy '{saved.name}' deployed to live scanner across {len(applied_pairs)} symbols.",
+        "strategy_id": saved.id,
+        "script_id": script.id,
+        "mode": mode_to_apply,
+        "planning_tf": saved.planning_tf,
+        "execution_tf": saved.execution_tf,
+        "applied_pairs": applied_pairs,
+    }
+
+
+@brain_router.delete("/saved-strategies/{strategy_id}")
+@router.delete("/saved-strategies/{strategy_id}")
+def delete_saved_strategy(strategy_id: int, db: Session = Depends(get_db)):
+    """Delete a strategy from the Tested PnL Vault."""
+    saved = db.query(SavedStrategy).filter_by(id=strategy_id).first()
+    if not saved:
+        raise HTTPException(status_code=404, detail=f"SavedStrategy #{strategy_id} not found")
+
+    db.delete(saved)
+    db.commit()
+    return {"status": "SUCCESS", "message": f"Strategy #{strategy_id} removed from vault."}
+
 
 
 

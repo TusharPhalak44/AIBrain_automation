@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import {
   Brain,
   Zap,
@@ -33,12 +33,17 @@ import {
   Percent,
   Play,
   X,
+  FileCode,
+  Sparkles,
+  Copy,
+  CheckCircle2,
 } from "lucide-react";
-import { fmtPct, fmtConfidence, safeArr, safeStr } from "../../utils/format";
+import { fmtPct, fmtConfidence, safeArr, safeStr, fmtUsd } from "../../utils/format";
 import { PairSchedule } from "../../hooks/useLiveStore";
-import { INSTRUMENTS, getInstrument } from "../../constants/instruments";
+import { INSTRUMENTS, getInstrument, isMarketOpen, formatSymbolPrice } from "../../constants/instruments";
 import { api } from "../../services/api";
 import { useToast } from "../Toast";
+import { StrategyLabTab } from "./StrategyLabTab";
 
 interface AIBrainTabProps {
   selectedSymbol: string;
@@ -65,38 +70,18 @@ interface ScannerConfig {
   scalp_execution_tf: string;
   swing_planning_tf: string;
   swing_execution_tf: string;
-  pairs: Array<{
-    symbol: string;
-    asset_class: string;
-    enabled: boolean;
-    scalp_enabled: boolean;
-    swing_enabled: boolean;
-    scan_interval_sec: number;
-    max_spread_points: number;
-  }>;
+  pairs: string[];
 }
 
-const ALL_INSTRUMENTS = [
-  { symbol: "EURUSD#", asset_class: "FOREX", name: "EUR/USD" },
-  { symbol: "USDJPY#", asset_class: "FOREX", name: "USD/JPY" },
-  { symbol: "GBPUSD#", asset_class: "FOREX", name: "GBP/USD" },
-  { symbol: "USDCAD#", asset_class: "FOREX", name: "USD/CAD" },
-  { symbol: "AUDUSD#", asset_class: "FOREX", name: "AUD/USD" },
-  { symbol: "GBPJPY#", asset_class: "FOREX", name: "GBP/JPY" },
-  { symbol: "GOLD#", asset_class: "COMMODITIES", name: "Spot Gold" },
-  { symbol: "SILVER#", asset_class: "COMMODITIES", name: "Spot Silver" },
-  { symbol: "OILCash#", asset_class: "COMMODITIES", name: "WTI Crude Oil" },
-  { symbol: "BRENTCash#", asset_class: "COMMODITIES", name: "Brent Crude Oil" },
-  { symbol: "BTCUSD#", asset_class: "CRYPTO", name: "Bitcoin 24/7" },
-  { symbol: "ETHUSD#", asset_class: "CRYPTO", name: "Ethereum 24/7" },
-  { symbol: "SOLUSD#", asset_class: "CRYPTO", name: "Solana 24/7" },
-  { symbol: "XRPUSD#", asset_class: "CRYPTO", name: "Ripple 24/7" },
-];
+type BrainSubTab = "RADAR" | "RULES" | "STRATEGY" | "HYGIENE";
 
 export const AIBrainTab: React.FC<AIBrainTabProps> = ({
   selectedSymbol,
   pairSchedules,
 }) => {
+  // Primary 4 Sub-Tabs State
+  const [activeSubTab, setActiveSubTab] = useState<BrainSubTab>("RADAR");
+
   const [reports, setReports] = useState<any[]>([]);
   const [newsData, setNewsData] = useState<any>({ events: [], blackout_check: null });
   const [learnedRules, setLearnedRules] = useState<any[]>([]);
@@ -115,10 +100,11 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
   const [radarSubView, setRadarSubView] = useState<"ALL" | "SCALP" | "SWING" | "ACTIONABLE">("ALL");
   const [splitView, setSplitView] = useState<boolean>(false);
 
-  // Asset Class Filter
+  // Asset Class & Rules Filters
   const [assetClassFilter, setAssetClassFilter] = useState<"ALL" | "FOREX" | "COMMODITIES" | "CRYPTO">("ALL");
   const [rulesSymbolFilter, setRulesSymbolFilter] = useState<string>("");
   const [rulesClassFilter, setRulesClassFilter] = useState<"ALL" | "FOREX" | "COMMODITIES" | "CRYPTO">("ALL");
+  const [rulesStatusFilter, setRulesStatusFilter] = useState<string>("ALL");
 
   // Cache Hygiene State
   const [cacheStatus, setCacheStatus] = useState<CacheStatus | null>(null);
@@ -174,10 +160,11 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
   const [selectedInterval, setSelectedInterval] = useState<number>(300);
   const [isSavingConfig, setIsSavingConfig] = useState(false);
 
-  // Institutional Prompt Preview Modal
+  // Institutional Prompt Preview Modal / Inspector
   const [promptModalOpen, setPromptModalOpen] = useState(false);
   const [promptPreviewText, setPromptPreviewText] = useState<string>("");
   const [promptLoading, setPromptLoading] = useState(false);
+  const [copiedPrompt, setCopiedPrompt] = useState(false);
 
   const toast = useToast();
 
@@ -290,7 +277,8 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
 
       setReports(safeArr(repData));
       setNewsData(newsPayload || { events: [], blackout_check: null });
-      setLearnedRules(safeArr(rulesData));
+      const rawRules = Array.isArray(rulesData) ? rulesData : (rulesData as any)?.rules || [];
+      setLearnedRules(safeArr(rawRules));
       setUpcomingData(upcomingPayload || { actionable_setups: [], watchlist_radar: [] });
       setPatternMemory(safeArr(patternsPayload));
       await Promise.all([fetchCacheStatus(), fetchScannerConfig(), fetchTelegramConfig()]);
@@ -304,15 +292,15 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
   useEffect(() => {
     fetchBrainData();
 
-    // 3-second live radar refresh for distance points and price updates
+    // 4-second live radar refresh for distance points and price updates
     const radarTimer = window.setInterval(async () => {
       try {
         const up = await api.ai.getUpcomingSetups();
         if (up) setUpcomingData(up);
       } catch (e) {
-        // silent
+        // silent background polling
       }
-    }, 3000);
+    }, 4000);
 
     return () => clearInterval(radarTimer);
   }, [fetchBrainData]);
@@ -383,35 +371,38 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
         swing_planning_tf: scannerConfig.swing_planning_tf,
         swing_execution_tf: scannerConfig.swing_execution_tf,
       });
-      toast.success("Configuration Hot-Reloaded", `Scan cadence set to ${selectedInterval}s without server restart.`);
-      await fetchScannerConfig();
+      toast.success(
+        "Scanner Configuration Saved",
+        `Cadence set to ${selectedInterval}s. Timeframes persisted.`
+      );
     } catch (e: any) {
-      toast.error("Config Save Failed", e.message || String(e));
+      toast.error("Save Failed", e.message || String(e));
     } finally {
       setIsSavingConfig(false);
     }
   };
 
-  const handleTogglePairScanner = async (sym: string) => {
-    try {
-      const res = await api.ai.togglePair(sym);
-      toast.success("Pair Updated", res.message || `Toggled ${sym}`);
-      await fetchScannerConfig();
-    } catch (e: any) {
-      toast.error("Toggle Failed", e.message || String(e));
+  const handleOpenPromptModal = async () => {
+    setPromptModalOpen(true);
+    if (!promptPreviewText) {
+      setPromptLoading(true);
+      try {
+        const res = await api.ai.getPromptPreview();
+        setPromptPreviewText(res?.system_prompt || "No prompt preview available.");
+      } catch (e: any) {
+        setPromptPreviewText("Failed to load prompt preview: " + (e.message || String(e)));
+      } finally {
+        setPromptLoading(false);
+      }
     }
   };
 
-  const handleOpenPromptPreview = async (sym: string = selectedSymbol) => {
-    setPromptLoading(true);
-    setPromptModalOpen(true);
-    try {
-      const res = await api.ai.getPromptPreview(sym || "GOLD#");
-      setPromptPreviewText(res.rendered_prompt || res.prompt_template || "");
-    } catch (e: any) {
-      setPromptPreviewText(`Failed to load prompt preview: ${e.message || String(e)}`);
-    } finally {
-      setPromptLoading(false);
+  const handleCopyPrompt = () => {
+    if (promptPreviewText) {
+      navigator.clipboard.writeText(promptPreviewText);
+      setCopiedPrompt(true);
+      setTimeout(() => setCopiedPrompt(false), 2000);
+      toast.info("Prompt Copied", "5-Gate System Prompt copied to clipboard.");
     }
   };
 
@@ -443,764 +434,381 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
     (item: any) => (item.trade_style || item.setup_mode) === "SWING"
   );
 
-  // Compute countdown ring to next scan
-  const currentSched = pairSchedules[selectedSymbol] || Object.values(pairSchedules)[0];
-  const secsRemaining = currentSched?.seconds_remaining ?? selectedInterval;
-  const progressPct = Math.min(
-    100,
-    Math.max(0, 100 - (secsRemaining / Math.max(1, selectedInterval)) * 100)
-  );
+  const actionableLimits = upcomingData?.actionable_setups || [];
+  const liveRulesCount = useMemo(() => {
+    return learnedRules.filter((r) => r.status === "LIVE").length;
+  }, [learnedRules]);
 
   return (
-    <div className="space-y-4">
-      {/* 1. TOP BANNER: TIER-1 MACRO NEWS & QUICK SCAN TRIGGERS */}
-      <div
-        className={`p-3.5 rounded-xl border flex flex-wrap items-center justify-between gap-3 text-xs transition ${
-          isBlackout
-            ? "bg-red-950/40 border-red-500/60 text-red-200"
-            : "bg-[#121824] border-slate-800 text-slate-300"
-        }`}
-      >
-        <div className="flex items-center gap-3">
-          <div
-            className={`w-9 h-9 rounded-lg flex items-center justify-center font-bold ${
-              isBlackout ? "bg-red-900/60 text-red-300" : "bg-blue-900/40 text-blue-400"
+    <div className="space-y-4 font-sans max-w-7xl mx-auto pb-10">
+      {/* =========================================================================
+          TIER 1: SUB-NAVIGATION TABS (4 FOCUSED WORKSPACES WITH LIVE COUNT BADGES)
+          ========================================================================= */}
+      <div className="bg-[#0b101b] border border-slate-800/80 rounded-2xl p-1.5 flex flex-wrap items-center justify-between gap-2 shadow-lg">
+        <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-none">
+          {/* Sub-Tab A: Radar & Scanner */}
+          <button
+            onClick={() => setActiveSubTab("RADAR")}
+            className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-mono font-bold transition ${
+              activeSubTab === "RADAR"
+                ? "bg-cyan-500 text-slate-950 shadow-[0_0_12px_rgba(6,182,212,0.3)]"
+                : "text-slate-400 hover:text-white hover:bg-slate-800/50"
             }`}
           >
-            <AlertTriangle className="w-5 h-5" />
-          </div>
-          <div>
-            <div className="font-bold flex items-center gap-2">
-              <span>TIER-1 MACRO NEWS BLACKOUT GUARD</span>
-              {isBlackout ? (
-                <span className="bg-red-600 text-white font-black px-2 py-0.5 rounded text-[10px] animate-pulse">
-                  BLACKOUT ACTIVE (±15m BLACKOUT)
-                </span>
-              ) : (
-                <span className="bg-emerald-950 text-emerald-400 border border-emerald-800 px-2 py-0.5 rounded text-[10px] font-bold">
-                  PASS - ENTRIES ALLOWED
-                </span>
-              )}
-            </div>
-            <div className="text-[11px] text-slate-400 mt-0.5">
-              {newsData?.blackout_check?.reason ||
-                "No Tier-1 news releases (CPI, Core PCE, NFP, FOMC) within ±15m window."}
-            </div>
-          </div>
+            <Compass className="w-4 h-4" />
+            <span>LIVE RADAR & SCANNER</span>
+            <span
+              className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
+                activeSubTab === "RADAR"
+                  ? "bg-slate-950 text-cyan-300 font-black"
+                  : "bg-slate-800 text-slate-300"
+              }`}
+            >
+              {upcomingData?.watchlist_radar?.length || 0}
+            </span>
+          </button>
+
+          {/* Sub-Tab B: Rules Vault */}
+          <button
+            onClick={() => setActiveSubTab("RULES")}
+            className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-mono font-bold transition ${
+              activeSubTab === "RULES"
+                ? "bg-cyan-500 text-slate-950 shadow-[0_0_12px_rgba(6,182,212,0.3)]"
+                : "text-slate-400 hover:text-white hover:bg-slate-800/50"
+            }`}
+          >
+            <BookOpen className="w-4 h-4" />
+            <span>RULES VAULT</span>
+            <span
+              className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
+                activeSubTab === "RULES"
+                  ? "bg-slate-950 text-emerald-400 font-black"
+                  : "bg-emerald-950/60 text-emerald-300 border border-emerald-800/40"
+              }`}
+            >
+              {liveRulesCount} LIVE
+            </span>
+          </button>
+
+          {/* Sub-Tab C: Strategy Lab & Prompt Studio */}
+          <button
+            onClick={() => setActiveSubTab("STRATEGY")}
+            className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-mono font-bold transition ${
+              activeSubTab === "STRATEGY"
+                ? "bg-cyan-500 text-slate-950 shadow-[0_0_12px_rgba(6,182,212,0.3)]"
+                : "text-slate-400 hover:text-white hover:bg-slate-800/50"
+            }`}
+          >
+            <FileCode className="w-4 h-4" />
+            <span>STRATEGY LAB & PROMPT STUDIO</span>
+            <span
+              className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
+                activeSubTab === "STRATEGY"
+                  ? "bg-slate-950 text-purple-300 font-black"
+                  : "bg-purple-950/60 text-purple-300 border border-purple-800/40"
+              }`}
+            >
+              5-GATE AI
+            </span>
+          </button>
+
+          {/* Sub-Tab D: System Hygiene & Telegram */}
+          <button
+            onClick={() => setActiveSubTab("HYGIENE")}
+            className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-mono font-bold transition ${
+              activeSubTab === "HYGIENE"
+                ? "bg-cyan-500 text-slate-950 shadow-[0_0_12px_rgba(6,182,212,0.3)]"
+                : "text-slate-400 hover:text-white hover:bg-slate-800/50"
+            }`}
+          >
+            <Bell className="w-4 h-4" />
+            <span>SYSTEM HYGIENE & TELEGRAM</span>
+            <span
+              className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
+                activeSubTab === "HYGIENE"
+                  ? "bg-slate-950 text-blue-300 font-black"
+                  : "bg-blue-950/60 text-blue-300 border border-blue-800/40"
+              }`}
+            >
+              TELEMETRY
+            </span>
+          </button>
         </div>
 
-        {/* Global Quick Action Buttons */}
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            onClick={() => handleOpenPromptPreview(selectedSymbol)}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-purple-300 font-bold rounded-lg text-xs border border-purple-900/40 shadow transition"
-            title="Inspect Institutional 5-Gate Gemini System Prompt"
-          >
-            <Code className="w-3.5 h-3.5 text-purple-400" />
-            <span>5-Gate Prompt</span>
-          </button>
-          <button
-            disabled={isScanning}
-            onClick={() => handleScanSpecificPair(selectedSymbol)}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white font-bold rounded-lg text-xs shadow transition disabled:opacity-50"
-          >
-            <Zap className="w-3.5 h-3.5" />
-            <span>Scan {selectedSymbol}</span>
-          </button>
+        {/* Global Quick Action: Scan All Triggers */}
+        <div className="flex items-center gap-2 px-2">
           <button
             disabled={isScanning}
             onClick={handleScanAll}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold rounded-lg text-xs border border-slate-700 transition disabled:opacity-50"
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 active:bg-cyan-700 text-slate-950 font-mono font-bold text-xs rounded-xl shadow-md transition disabled:opacity-50"
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${isScanning ? "animate-spin" : ""}`} />
-            <span>Scan All Universe</span>
+            <Zap className={`w-3.5 h-3.5 ${isScanning ? "animate-spin" : ""}`} />
+            <span>{isScanning ? "Scanning 14 Pairs..." : "Scan All Pairs"}</span>
           </button>
         </div>
       </div>
 
-      {/* 2. TASK 1: MULTI-ASSET HIGH-LIQUIDITY UNIVERSE & ASSET CLASS FILTER */}
-      <div className="bg-[#121824] border border-slate-800 rounded-xl p-3.5 space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <Filter className="w-4 h-4 text-cyan-400" />
-            <span className="font-bold text-white text-xs uppercase tracking-wider">
-              Asset Class Filters & MT5 Symbol Universe (14 Pairs)
-            </span>
-          </div>
-
-          {/* Filter Pills */}
-          <div className="flex items-center gap-1.5 bg-slate-950 border border-slate-800 rounded-lg p-1 text-xs">
-            {(["ALL", "FOREX", "COMMODITIES", "CRYPTO"] as const).map((ac) => {
-              const count =
-                ac === "ALL"
-                  ? ALL_INSTRUMENTS.length
-                  : ALL_INSTRUMENTS.filter((i) => i.asset_class === ac).length;
-              return (
-                <button
-                  key={ac}
-                  onClick={() => setAssetClassFilter(ac)}
-                  className={`px-3 py-1 rounded font-bold text-xs transition ${
-                    assetClassFilter === ac
-                      ? "bg-blue-600 text-white shadow"
-                      : "text-slate-400 hover:text-white"
-                  }`}
-                >
-                  {ac} ({count})
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Symbol Quick Chips with Weekend Indicators */}
-        <div className="flex flex-wrap gap-2 pt-1">
-          {ALL_INSTRUMENTS.filter(
-            (i) => assetClassFilter === "ALL" || i.asset_class === assetClassFilter
-          ).map((item) => {
-            const isSelected = selectedSymbol === item.symbol;
-            const isCrypto = item.asset_class === "CRYPTO";
-            const pairCfg = scannerConfig.pairs.find((p) => p.symbol === item.symbol);
-            const isEnabled = pairCfg ? pairCfg.enabled : true;
-
-            return (
-              <div
-                key={item.symbol}
-                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-mono transition ${
-                  isSelected
-                    ? "bg-blue-950/80 border-blue-500 text-blue-200"
-                    : isEnabled
-                    ? "bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700"
-                    : "bg-slate-950/40 border-slate-900 text-slate-600"
-                }`}
-              >
-                <button
-                  onClick={() => handleScanSpecificPair(item.symbol)}
-                  className="font-bold flex items-center gap-1 hover:text-amber-400"
-                  title={`Click to trigger manual scan for ${item.symbol}`}
-                >
-                  <span>{item.symbol}</span>
-                </button>
-                <span
-                  className={`text-[9px] px-1 py-0.2 rounded font-black ${
-                    isCrypto
-                      ? "bg-orange-950 text-orange-400 border border-orange-800/60"
-                      : "bg-slate-900 text-slate-400"
-                  }`}
-                >
-                  {isCrypto ? "24/7" : item.asset_class.slice(0, 3)}
-                </span>
-                <button
-                  onClick={() => handleTogglePairScanner(item.symbol)}
-                  className={`text-[10px] ml-1 font-bold ${
-                    isEnabled ? "text-emerald-400 hover:text-emerald-300" : "text-slate-600 hover:text-slate-400"
-                  }`}
-                  title={isEnabled ? "Active - click to pause scanner" : "Paused - click to enable scanner"}
-                >
-                  {isEnabled ? "●" : "○"}
-                </button>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* 3. TASK 2: SYSTEM HYGIENE & DAILY CACHE CONTROL PANEL */}
-      <div className="bg-[#121824] border border-slate-800 rounded-xl p-4">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/80 pb-3">
-          <div className="flex items-center gap-3">
-            <div className="p-2.5 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-              <Database className="w-5 h-5" />
-            </div>
-            <div>
+      {/* =========================================================================
+          SUB-TAB A: LIVE RADAR & ACTIVE SCANNER
+          ========================================================================= */}
+      {activeSubTab === "RADAR" && (
+        <div className="space-y-4">
+          {/* Top Banner: Tier-1 Macro News & Quick Scan Triggers */}
+          <div className="bg-[#0f1623] border border-slate-800/80 rounded-2xl p-4 shadow-xl">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/80 pb-3">
               <div className="flex items-center gap-2">
-                <h3 className="font-bold text-white text-sm tracking-wide">
-                  SYSTEM HYGIENE & DAILY CACHE ENGINE
+                <Brain className="w-5 h-5 text-cyan-400" />
+                <h3 className="font-bold text-white text-sm tracking-wide font-mono">
+                  GEMINI SUPERVISORY RADAR: {selectedSymbol}
                 </h3>
-                <span
-                  className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                    cacheStatus?.health_badge === "Healthy"
-                      ? "bg-emerald-950 text-emerald-400 border border-emerald-800"
-                      : "bg-amber-950 text-amber-400 border border-amber-800 animate-pulse"
-                  }`}
-                >
-                  {cacheStatus?.health_badge || "Healthy"}
-                </span>
-              </div>
-              <p className="text-xs text-slate-400">
-                Automated daily flush at 00:05 UTC. In-memory DFs, expired pre-trigger radar TTLs (&gt;2h Scalp, &gt;24h Swing), and payload buffers. Never touches closed trades or learned rules.
-              </p>
-            </div>
-          </div>
-
-          {/* Action buttons */}
-          <div className="flex items-center gap-2">
-            <div className="flex items-center gap-2 bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs">
-              <span className="text-slate-400 font-semibold">Auto-Daily:</span>
-              <button
-                onClick={handleToggleAutoDailyCache}
-                className={`font-black text-xs px-2 py-0.5 rounded transition ${
-                  cacheStatus?.auto_daily_enabled
-                    ? "bg-emerald-900/60 text-emerald-300 border border-emerald-700"
-                    : "bg-slate-800 text-slate-400"
-                }`}
-              >
-                {cacheStatus?.auto_daily_enabled ? "ON (00:05 UTC)" : "OFF"}
-              </button>
-            </div>
-
-            <button
-              disabled={cacheClearing}
-              onClick={handleClearCacheNow}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-red-950/60 hover:bg-red-900/80 text-red-300 border border-red-800/80 font-bold rounded-lg text-xs shadow transition disabled:opacity-50"
-            >
-              <Trash2 className={`w-3.5 h-3.5 ${cacheClearing ? "animate-spin" : ""}`} />
-              <span>Clear Cache Now</span>
-            </button>
-          </div>
-        </div>
-
-        {/* Cache Telemetry Metrics Grid */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 pt-3">
-          <div className="bg-slate-950/70 border border-slate-800/80 rounded-lg p-2.5">
-            <div className="text-[10px] text-slate-500 font-mono">Last Cleared</div>
-            <div className="text-xs font-bold text-white mt-0.5">
-              {cacheStatus?.last_cleared_at_ist || "Never"}
-            </div>
-          </div>
-          <div className="bg-slate-950/70 border border-slate-800/80 rounded-lg p-2.5">
-            <div className="text-[10px] text-slate-500 font-mono">Next Auto-Purge</div>
-            <div className="text-xs font-bold text-cyan-400 mt-0.5">
-              {cacheStatus?.next_scheduled_at_ist || "00:05 UTC"}
-            </div>
-          </div>
-          <div className="bg-slate-950/70 border border-slate-800/80 rounded-lg p-2.5">
-            <div className="text-[10px] text-slate-500 font-mono">Cached In-Memory Objects</div>
-            <div className="text-xs font-bold text-amber-400 mt-0.5">
-              {cacheStatus?.cached_entries_count ?? 0} Objects (~{cacheStatus?.estimated_size_kb ?? 0} KB)
-            </div>
-          </div>
-          <div className="bg-slate-950/70 border border-slate-800/80 rounded-lg p-2.5">
-            <div className="text-[10px] text-slate-500 font-mono">Last Purge Summary</div>
-            <div className="text-xs font-bold text-emerald-400 mt-0.5 truncate" title={cacheStatus?.last_purge_summary?.reason}>
-              {cacheStatus?.last_purge_summary?.items_cleared ?? 0} purged ({cacheStatus?.last_purge_summary?.reason || "Active"})
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* 3.5. TELEGRAM NOTIFICATION CENTER & ALERT ENGINE */}
-      <div className="bg-[#121824] border border-slate-800 rounded-xl p-4 space-y-4">
-        {/* Header */}
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/80 pb-3">
-          <div className="flex items-center gap-3">
-            <div className="p-2.5 rounded-lg bg-blue-500/10 text-blue-400 border border-blue-500/20">
-              <Send className="w-5 h-5" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h3 className="font-bold text-white text-sm tracking-wide">
-                  TELEGRAM NOTIFICATION CENTER & ALERT ENGINE
-                </h3>
-                <span
-                  className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                    telegramConfig.enabled && telegramConfig.is_configured
-                      ? "bg-emerald-950 text-emerald-400 border border-emerald-800"
-                      : !telegramConfig.enabled
-                      ? "bg-slate-900 text-slate-500 border border-slate-800"
-                      : "bg-amber-950 text-amber-400 border border-amber-800 animate-pulse"
-                  }`}
-                >
-                  {telegramConfig.enabled && telegramConfig.is_configured
-                    ? "🟢 CONNECTED"
-                    : !telegramConfig.enabled
-                    ? "⚪ DISABLED"
-                    : "⚠️ NOT CONFIGURED"}
-                </span>
-                {telegramConfig.bot_username && (
-                  <span className="text-xs text-blue-400 font-mono">
-                    @{telegramConfig.bot_username}
+                {isBlackout ? (
+                  <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40 animate-pulse font-mono">
+                    HIGH-IMPACT NEWS BLACKOUT ACTIVE
+                  </span>
+                ) : (
+                  <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 font-mono">
+                    AUTONOMOUS RADAR READY
                   </span>
                 )}
               </div>
-              <p className="text-xs text-slate-400">
-                Non-blocking asynchronous institutional HTML alerting with anti-spam deduplication and granular category controls.
-              </p>
-            </div>
-          </div>
 
-          {/* Master Toggle & Save Controls */}
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() =>
-                setTelegramConfig((prev) => ({ ...prev, enabled: !prev.enabled }))
-              }
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border transition ${
-                telegramConfig.enabled
-                  ? "bg-emerald-950 text-emerald-300 border-emerald-700/80"
-                  : "bg-slate-900 text-slate-400 border-slate-800"
-              }`}
-            >
-              <span>{telegramConfig.enabled ? "MASTER: ON" : "MASTER: OFF"}</span>
-            </button>
-
-            <button
-              disabled={telegramSaving}
-              onClick={handleSaveTelegramConfig}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-lg text-xs shadow transition disabled:opacity-50"
-            >
-              <Save className={`w-3.5 h-3.5 ${telegramSaving ? "animate-spin" : ""}`} />
-              <span>{telegramSaving ? "Saving..." : "Save Settings"}</span>
-            </button>
-          </div>
-        </div>
-
-        {/* Credentials & Routing Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          {/* Bot Token Input */}
-          <div className="bg-slate-950/70 border border-slate-800/80 rounded-lg p-3 space-y-1.5">
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-semibold text-slate-300">Bot Token</span>
-              <button
-                type="button"
-                onClick={() => setShowTokenInput(!showTokenInput)}
-                className="text-[10px] text-blue-400 hover:text-blue-300 font-mono flex items-center gap-1"
-              >
-                {showTokenInput ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
-                <span>{showTokenInput ? "Cancel" : "Change Token"}</span>
-              </button>
-            </div>
-            {showTokenInput ? (
-              <input
-                type="password"
-                value={newTokenInput}
-                onChange={(e) => setNewTokenInput(e.target.value)}
-                placeholder="Paste token from @BotFather..."
-                className="w-full bg-slate-900 border border-blue-500/50 rounded px-2.5 py-1 text-xs text-white font-mono placeholder:text-slate-600 focus:outline-none focus:border-blue-400"
-              />
-            ) : (
-              <div className="text-xs font-mono text-slate-300 bg-slate-900/60 rounded px-2.5 py-1 border border-slate-850 truncate">
-                {telegramConfig.bot_token_masked || "No bot token configured"}
-              </div>
-            )}
-          </div>
-
-          {/* Admin Chat ID Input */}
-          <div className="bg-slate-950/70 border border-slate-800/80 rounded-lg p-3 space-y-1.5">
-            <span className="text-[11px] font-semibold text-slate-300">Admin Chat ID</span>
-            <input
-              type="text"
-              value={chatIdInput}
-              onChange={(e) => setChatIdInput(e.target.value)}
-              placeholder="e.g. 1229234929 or -100..."
-              className="w-full bg-slate-900 border border-slate-800 rounded px-2.5 py-1 text-xs text-white font-mono placeholder:text-slate-600 focus:outline-none focus:border-blue-400"
-            />
-          </div>
-
-          {/* Thread / Topic ID (Optional) */}
-          <div className="bg-slate-950/70 border border-slate-800/80 rounded-lg p-3 space-y-1.5">
-            <span className="text-[11px] font-semibold text-slate-300">
-              Message Thread ID <span className="text-slate-500 font-normal">(Optional Forum Topic)</span>
-            </span>
-            <input
-              type="text"
-              value={threadIdInput}
-              onChange={(e) => setThreadIdInput(e.target.value)}
-              placeholder="e.g. 42 (Leave blank for default chat)"
-              className="w-full bg-slate-900 border border-slate-800 rounded px-2.5 py-1 text-xs text-white font-mono placeholder:text-slate-600 focus:outline-none focus:border-blue-400"
-            />
-          </div>
-        </div>
-
-        {/* Granular Alert Category Subscriptions Matrix */}
-        <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-white tracking-wide uppercase">
-              Alert Category Subscriptions
-            </span>
-            <label className="flex items-center gap-1.5 cursor-pointer text-xs font-mono text-slate-400 hover:text-white">
-              <input
-                type="checkbox"
-                checked={telegramConfig.silent_pre_trigger}
-                onChange={(e) =>
-                  setTelegramConfig((prev) => ({
-                    ...prev,
-                    silent_pre_trigger: e.target.checked,
-                  }))
-                }
-                className="rounded border-slate-700 bg-slate-900 text-blue-500 focus:ring-0"
-              />
-              <span>🔕 Silent Radar Pings (No Push Sound)</span>
-            </label>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-5 gap-2.5">
-            {/* 1. Pre-Trigger Radar */}
-            <div
-              onClick={() =>
-                setTelegramConfig((prev) => ({
-                  ...prev,
-                  notify_pre_trigger: !prev.notify_pre_trigger,
-                }))
-              }
-              className={`cursor-pointer rounded-lg p-2.5 border transition ${
-                telegramConfig.notify_pre_trigger
-                  ? "bg-amber-950/30 border-amber-500/50 text-amber-200"
-                  : "bg-slate-950/40 border-slate-850 text-slate-500"
-              }`}
-            >
-              <div className="flex items-center justify-between text-xs font-bold">
-                <span>📡 Setup Radar</span>
-                <span className="text-[10px]">{telegramConfig.notify_pre_trigger ? "ON" : "OFF"}</span>
-              </div>
-              <p className="text-[10px] text-slate-400 mt-1 leading-snug">
-                Pre-trigger radar setups when readiness &ge; 60% (90m / 6h TTL).
-              </p>
-            </div>
-
-            {/* 2. Executions */}
-            <div
-              onClick={() =>
-                setTelegramConfig((prev) => ({
-                  ...prev,
-                  notify_executions: !prev.notify_executions,
-                }))
-              }
-              className={`cursor-pointer rounded-lg p-2.5 border transition ${
-                telegramConfig.notify_executions
-                  ? "bg-emerald-950/30 border-emerald-500/50 text-emerald-200"
-                  : "bg-slate-950/40 border-slate-850 text-slate-500"
-              }`}
-            >
-              <div className="flex items-center justify-between text-xs font-bold">
-                <span>🟢 Executions</span>
-                <span className="text-[10px]">{telegramConfig.notify_executions ? "ON" : "OFF"}</span>
-              </div>
-              <p className="text-[10px] text-slate-400 mt-1 leading-snug">
-                Market orders & resting limits with exact 5-Gate pass audit.
-              </p>
-            </div>
-
-            {/* 3. BE & Partials */}
-            <div
-              onClick={() =>
-                setTelegramConfig((prev) => ({
-                  ...prev,
-                  notify_be_and_partials: !prev.notify_be_and_partials,
-                }))
-              }
-              className={`cursor-pointer rounded-lg p-2.5 border transition ${
-                telegramConfig.notify_be_and_partials
-                  ? "bg-cyan-950/30 border-cyan-500/50 text-cyan-200"
-                  : "bg-slate-950/40 border-slate-850 text-slate-500"
-              }`}
-            >
-              <div className="flex items-center justify-between text-xs font-bold">
-                <span>🔒 BE & Partials</span>
-                <span className="text-[10px]">{telegramConfig.notify_be_and_partials ? "ON" : "OFF"}</span>
-              </div>
-              <p className="text-[10px] text-slate-400 mt-1 leading-snug">
-                +1.0R Breakeven lock and 60% TP1 partial scale-out with trail.
-              </p>
-            </div>
-
-            {/* 4. Closures & Scorecard */}
-            <div
-              onClick={() =>
-                setTelegramConfig((prev) => ({
-                  ...prev,
-                  notify_closures: !prev.notify_closures,
-                }))
-              }
-              className={`cursor-pointer rounded-lg p-2.5 border transition ${
-                telegramConfig.notify_closures
-                  ? "bg-purple-950/30 border-purple-500/50 text-purple-200"
-                  : "bg-slate-950/40 border-slate-850 text-slate-500"
-              }`}
-            >
-              <div className="flex items-center justify-between text-xs font-bold">
-                <span>🏆 Closures</span>
-                <span className="text-[10px]">{telegramConfig.notify_closures ? "ON" : "OFF"}</span>
-              </div>
-              <p className="text-[10px] text-slate-400 mt-1 leading-snug">
-                Final deal exits (gross, swap, comm, net PnL) + daily scorecard.
-              </p>
-            </div>
-
-            {/* 5. System Guardrails */}
-            <div
-              onClick={() =>
-                setTelegramConfig((prev) => ({
-                  ...prev,
-                  notify_system_alerts: !prev.notify_system_alerts,
-                }))
-              }
-              className={`cursor-pointer rounded-lg p-2.5 border transition ${
-                telegramConfig.notify_system_alerts
-                  ? "bg-red-950/30 border-red-500/50 text-red-200"
-                  : "bg-slate-950/40 border-slate-850 text-slate-500"
-              }`}
-            >
-              <div className="flex items-center justify-between text-xs font-bold">
-                <span>🚨 Guardrails</span>
-                <span className="text-[10px]">{telegramConfig.notify_system_alerts ? "ON" : "OFF"}</span>
-              </div>
-              <p className="text-[10px] text-slate-400 mt-1 leading-snug">
-                -3.0% Daily DD circuit breaker, forensic rule promotions, vault.
-              </p>
-            </div>
-          </div>
-        </div>
-
-        {/* Institutional Template Preview Simulator */}
-        <div className="bg-slate-950/60 border border-slate-850 rounded-lg p-3 flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-bold text-white">Preview Simulator:</span>
-            <select
-              value={testTemplate}
-              onChange={(e) => setTestTemplate(e.target.value)}
-              className="bg-slate-900 border border-slate-800 text-xs text-white rounded px-2.5 py-1 font-mono focus:outline-none focus:border-blue-400"
-            >
-              <option value="SETUP">📡 1. Pre-Trigger Setup Radar</option>
-              <option value="EXECUTION">🟢 2. Live Market Execution (Buy/Sell)</option>
-              <option value="LIMIT">⏳ 3. Pending Limit Filled / Expired</option>
-              <option value="BE">🔒 4. Breakeven Locked (+1.0R)</option>
-              <option value="TP1">💰 5. TP1 Hit (60% Banked)</option>
-              <option value="CLOSE">🏆 6. Trade Closed & Scorecard</option>
-              <option value="GUARDRAIL">🚨 7. System Guardrail & Vault Alert</option>
-            </select>
-
-            <select
-              value={testSymbol}
-              onChange={(e) => setTestSymbol(e.target.value)}
-              className="bg-slate-900 border border-slate-800 text-xs text-white rounded px-2.5 py-1 font-mono focus:outline-none focus:border-blue-400"
-            >
-              <option value="GOLD#">GOLD#</option>
-              <option value="EURUSD#">EURUSD#</option>
-              <option value="BTCUSD#">BTCUSD#</option>
-              <option value="OILCash#">OILCash#</option>
-              <option value="USDJPY#">USDJPY#</option>
-              <option value="ETHUSD#">ETHUSD#</option>
-            </select>
-          </div>
-
-          <button
-            disabled={testSending || !telegramConfig.enabled}
-            onClick={handleSendTestPreview}
-            className="flex items-center gap-1.5 px-3 py-1 bg-slate-900 hover:bg-slate-800 text-blue-400 border border-blue-500/40 hover:border-blue-400 font-bold rounded text-xs transition disabled:opacity-50"
-          >
-            <Send className={`w-3.5 h-3.5 ${testSending ? "animate-spin" : ""}`} />
-            <span>{testSending ? "Sending Preview..." : "Send Test Alert Preview"}</span>
-          </button>
-        </div>
-      </div>
-
-      {/* 4. TASK 3: UPCOMING TRADES & PRE-TRIGGER SETUPS RADAR (SCALP VS SWING) */}
-      <div className="bg-[#121824] border border-slate-800 rounded-xl p-4 space-y-4">
-        {/* Header & Segmented Tabs */}
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/80 pb-3">
-          <div className="flex items-center gap-3">
-            <div className="p-2.5 rounded-lg bg-amber-500/10 text-amber-400 border border-amber-500/20">
-              <Target className="w-5 h-5" />
-            </div>
-            <div>
+              {/* Quick Scan Triggers */}
               <div className="flex items-center gap-2">
-                <h3 className="font-bold text-white text-sm tracking-wide">
-                  UPCOMING TRADES & PRE-TRIGGER SETUPS RADAR
-                </h3>
-                <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                  AUTO ROUTED
-                </span>
+                <button
+                  disabled={isScanning}
+                  onClick={() => handleScanSpecificPair(selectedSymbol)}
+                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-mono font-semibold rounded-lg border border-slate-700 transition flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 text-cyan-400 ${isScanning ? "animate-spin" : ""}`} />
+                  <span>Scan {selectedSymbol}</span>
+                </button>
               </div>
-              <p className="text-xs text-slate-400">
-                Institutional setups forecasted by Gemini with live tick proximity tracking, TTL expiry guards, and spread drag impact.
-              </p>
+            </div>
+
+            {/* Macro Releases Horizon */}
+            <div className="mt-3 flex flex-wrap items-center justify-between text-xs text-slate-400 gap-2 font-mono">
+              <div className="flex items-center gap-2">
+                <Clock className="w-4 h-4 text-slate-500" />
+                <span>Next Release Horizon:</span>
+                {newsData?.events?.length > 0 ? (
+                  <span className="text-slate-200 font-semibold">
+                    {newsData.events[0].title} ({newsData.events[0].currency}) - {newsData.events[0].impact} Impact
+                  </span>
+                ) : (
+                  <span className="text-slate-500">No high-impact releases within ±30 min window.</span>
+                )}
+              </div>
+              <div className="text-[11px] text-slate-500">
+                14-Pair Packet Cadence: <strong className="text-cyan-400">{selectedInterval}s</strong>
+              </div>
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            {/* Desktop Side-by-Side Split View Toggle */}
-            <button
-              onClick={() => setSplitView(!splitView)}
-              className={`hidden md:flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold border transition ${
-                splitView
-                  ? "bg-purple-900/40 border-purple-500/60 text-purple-200"
-                  : "bg-slate-950 border-slate-800 text-slate-400 hover:text-white"
-              }`}
-            >
-              <Columns className="w-3.5 h-3.5" />
-              <span>{splitView ? "↔ Side-by-Side Split" : "Single Tab View"}</span>
-            </button>
-
-            {/* Segmented Tab Bar */}
-            <div className="flex items-center gap-1 bg-slate-950 border border-slate-800 rounded-lg p-1 text-xs">
-              <button
-                onClick={() => setRadarSubView("ALL")}
-                className={`px-3 py-1 rounded font-bold transition ${
-                  radarSubView === "ALL"
-                    ? "bg-amber-500/20 text-amber-300"
-                    : "text-slate-400 hover:text-white"
-                }`}
-              >
-                All Radar ({filteredWatchlist.length})
-              </button>
-              <button
-                onClick={() => setRadarSubView("SCALP")}
-                className={`px-3 py-1 rounded font-bold transition flex items-center gap-1 ${
-                  radarSubView === "SCALP"
-                    ? "bg-cyan-500/20 text-cyan-300"
-                    : "text-slate-400 hover:text-white"
-                }`}
-              >
-                <Zap className="w-3 h-3 text-cyan-400" />
-                <span>Scalp ({scalpSetups.length})</span>
-              </button>
-              <button
-                onClick={() => setRadarSubView("SWING")}
-                className={`px-3 py-1 rounded font-bold transition flex items-center gap-1 ${
-                  radarSubView === "SWING"
-                    ? "bg-indigo-500/20 text-indigo-300"
-                    : "text-slate-400 hover:text-white"
-                }`}
-              >
-                <Compass className="w-3 h-3 text-indigo-400" />
-                <span>Swing ({swingSetups.length})</span>
-              </button>
-              <button
-                onClick={() => setRadarSubView("ACTIONABLE")}
-                className={`px-3 py-1 rounded font-bold transition ${
-                  radarSubView === "ACTIONABLE"
-                    ? "bg-emerald-500/20 text-emerald-300"
-                    : "text-slate-400 hover:text-white"
-                }`}
-              >
-                Limits ({upcomingData?.actionable_setups?.length || 0})
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* Section A: Actionable Limits */}
-        {(radarSubView === "ALL" || radarSubView === "ACTIONABLE") && (
-          <div className="space-y-2.5">
+          {/* 14-Pair Universe Chips */}
+          <div className="bg-[#0f1623] border border-slate-800/80 rounded-2xl p-3 shadow-md space-y-2">
             <div className="flex items-center justify-between text-xs">
-              <span className="font-bold text-emerald-400 flex items-center gap-1.5">
-                <Crosshair className="w-4 h-4" />
-                <span>Actionable Setups Ready for Execution ({upcomingData?.actionable_setups?.length || 0})</span>
-              </span>
-              <span className="text-[11px] text-slate-500 font-mono">Autonomous MT5 Market & Pending Limit Routing</span>
+              <div className="flex items-center gap-2 font-mono text-slate-400">
+                <Target className="w-4 h-4 text-cyan-400" />
+                <span className="font-bold text-white">14-PAIR UNIVERSE:</span>
+              </div>
+
+              {/* Asset Class Filter Pills */}
+              <div className="flex items-center gap-1">
+                {(["ALL", "FOREX", "COMMODITIES", "CRYPTO"] as const).map((cls) => (
+                  <button
+                    key={cls}
+                    onClick={() => setAssetClassFilter(cls)}
+                    className={`text-[10px] px-2.5 py-0.5 rounded-lg font-mono font-semibold transition ${
+                      assetClassFilter === cls
+                        ? "bg-cyan-500 text-slate-950 font-bold"
+                        : "bg-slate-900 text-slate-400 hover:text-white"
+                    }`}
+                  >
+                    {cls}
+                  </button>
+                ))}
+              </div>
             </div>
 
-            {upcomingData?.actionable_setups && upcomingData.actionable_setups.length > 0 ? (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                {upcomingData.actionable_setups.map((setup: any) => {
-                  const isBuy = setup.direction === "BUY";
-                  return (
-                    <div
-                      key={setup.id}
-                      className="bg-slate-950/80 border border-slate-800 rounded-xl p-3.5 space-y-3 hover:border-slate-700 transition"
-                    >
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <span className="font-bold text-white text-sm font-mono">{setup.symbol}</span>
-                          <span
-                            className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                              isBuy
-                                ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
-                                : "bg-red-500/20 text-red-300 border border-red-500/30"
-                            }`}
-                          >
-                            {setup.direction} {setup.mode}
-                          </span>
-                          <span className="text-slate-400 text-xs font-mono">{setup.lots} Lots</span>
-                        </div>
+            {/* Symbol Chips */}
+            <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-none py-1">
+              {INSTRUMENTS.map((inst) => {
+                const isSelected = selectedSymbol === inst.symbol;
+                const openState = isMarketOpen(inst.symbol);
 
-                        {/* Live Distance Pill */}
-                        <div
-                          className={`px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-1 font-mono ${
-                            setup.in_trigger_zone
-                              ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 animate-pulse"
-                              : "bg-slate-800 text-slate-300"
-                          }`}
-                        >
-                          {setup.in_trigger_zone ? (
-                            <span>🎯 IN TRIGGER ZONE</span>
-                          ) : (
-                            <span>{Math.abs(setup.distance_points)} pts away</span>
-                          )}
-                        </div>
-                      </div>
+                return (
+                  <button
+                    key={inst.symbol}
+                    onClick={() => handleScanSpecificPair(inst.symbol)}
+                    className={`px-2.5 py-1 rounded-xl text-xs font-mono font-bold whitespace-nowrap transition flex items-center gap-1.5 ${
+                      isSelected
+                        ? "bg-cyan-500 text-slate-950 shadow-md"
+                        : "bg-slate-900/90 text-slate-300 hover:bg-slate-800 border border-slate-800"
+                    }`}
+                  >
+                    <span
+                      className={`w-1.5 h-1.5 rounded-full ${
+                        openState ? "bg-emerald-400" : "bg-slate-500"
+                      }`}
+                    />
+                    <span>{inst.symbol}</span>
+                    {inst.is24_7 && (
+                      <span className="text-[8px] px-1 py-0.2 rounded bg-purple-950 text-purple-300 border border-purple-800">
+                        24/7
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
 
-                      {/* Coordinates Grid */}
-                      <div className="grid grid-cols-5 gap-1.5 bg-slate-900/60 p-2 rounded-lg font-mono text-[11px]">
-                        <div>
-                          <div className="text-[10px] text-slate-500">Entry</div>
-                          <div className="text-white font-bold">{setup.entry_price}</div>
-                        </div>
-                        <div>
-                          <div className="text-[10px] text-slate-500">Stop Loss</div>
-                          <div className="text-red-400">{setup.sl}</div>
-                        </div>
-                        <div>
-                          <div className="text-[10px] text-slate-500">TP1 (+1.5R)</div>
-                          <div className="text-emerald-400">{setup.tp1}</div>
-                        </div>
-                        <div>
-                          <div className="text-[10px] text-slate-500">TP2 (+3R)</div>
-                          <div className="text-emerald-300 font-bold">{setup.tp2}</div>
-                        </div>
-                        <div>
-                          <div className="text-[10px] text-slate-500">R:R</div>
-                          <div className="text-cyan-400 font-bold">{setup.rr_ratio}R</div>
-                        </div>
-                      </div>
-
-                      {/* Proximity Progress Bar */}
-                      <div>
-                        <div className="flex justify-between text-[10px] text-slate-400 mb-1">
-                          <span>Proximity to Trigger</span>
-                          <span className="font-bold text-emerald-400">{setup.proximity_pct ?? 90}%</span>
-                        </div>
-                        <div className="w-full bg-slate-900 rounded-full h-1.5 overflow-hidden">
-                          <div
-                            style={{ width: `${setup.proximity_pct ?? 90}%` }}
-                            className="bg-emerald-500 h-full rounded-full transition-all"
-                          />
-                        </div>
-                      </div>
-
-                      <p className="text-[11px] text-slate-400 line-clamp-2 italic">
-                        "{setup.thesis || "Algorithmic setup confirmed by Gemini Supervisor."}"
-                      </p>
-                    </div>
-                  );
-                })}
+          {/* Developing Radar Cards (Scalp vs Swing) */}
+          <div className="bg-[#0f1623] border border-slate-800/80 rounded-2xl p-4 shadow-xl space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/80 pb-3">
+              <div className="flex items-center gap-2">
+                <Compass className="w-5 h-5 text-cyan-400" />
+                <h3 className="font-bold text-white text-sm tracking-wide font-mono">
+                  PRE-TRIGGER RADAR SETUPS (SCALP VS SWING)
+                </h3>
               </div>
-            ) : (
-              <div className="p-3 bg-slate-950/40 border border-slate-800/60 rounded-lg text-slate-500 text-xs text-center font-mono">
-                No active limit orders currently pending execution.
+
+              <div className="flex items-center gap-2">
+                {/* Segmented Sub-View */}
+                <div className="flex bg-slate-900 p-0.5 rounded-lg border border-slate-800 text-[10px] font-mono">
+                  {(["ALL", "SCALP", "SWING", "ACTIONABLE"] as const).map((view) => (
+                    <button
+                      key={view}
+                      onClick={() => setRadarSubView(view)}
+                      className={`px-2.5 py-1 rounded-md font-bold transition ${
+                        radarSubView === view
+                          ? "bg-cyan-500 text-slate-950"
+                          : "text-slate-400 hover:text-white"
+                      }`}
+                    >
+                      {view === "ALL"
+                        ? `All (${filteredWatchlist.length})`
+                        : view === "SCALP"
+                        ? `⚡ Scalp (${scalpSetups.length})`
+                        : view === "SWING"
+                        ? `🌊 Swing (${swingSetups.length})`
+                        : `Actionable (${actionableLimits.length})`}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Split View Toggle */}
+                <button
+                  onClick={() => setSplitView((v) => !v)}
+                  className={`hidden lg:flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-mono font-semibold border transition ${
+                    splitView
+                      ? "bg-cyan-950 text-cyan-300 border-cyan-800"
+                      : "bg-slate-900 text-slate-400 border-slate-800 hover:text-white"
+                  }`}
+                >
+                  <Columns className="w-3.5 h-3.5" />
+                  <span>{splitView ? "Side-by-Side" : "Stacked"}</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Actionable Limits Section (if any) */}
+            {actionableLimits.length > 0 && (radarSubView === "ALL" || radarSubView === "ACTIONABLE") && (
+              <div className="space-y-2">
+                <div className="text-xs font-bold text-amber-400 font-mono uppercase tracking-wider flex items-center gap-1.5">
+                  <AlertTriangle className="w-4 h-4" />
+                  <span>Actionable Limit Approvals ({actionableLimits.length})</span>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {actionableLimits.map((item: any, idx: number) => {
+                    const isBuy = item.direction === "BUY";
+                    const entryVal = item.planned_entry ?? item.entry_price;
+                    const slVal = item.planned_sl ?? item.sl;
+                    const tp2Val = item.planned_tp2 ?? item.tp2;
+                    return (
+                      <div
+                        key={item.id || idx}
+                        className="p-3 bg-amber-950/20 border border-amber-500/40 rounded-xl space-y-2 font-mono text-xs"
+                      >
+                        <div className="flex justify-between items-center gap-2">
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-bold text-white">{item.symbol}</span>
+                            {item.direction && (
+                              <span
+                                className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                                  isBuy
+                                    ? "bg-emerald-950 text-emerald-300 border border-emerald-700/60"
+                                    : "bg-rose-950 text-rose-300 border border-rose-700/60"
+                                }`}
+                              >
+                                {item.direction}
+                              </span>
+                            )}
+                          </div>
+                          <span className="text-[10px] text-amber-300 font-bold px-1.5 py-0.5 rounded bg-amber-900/40">
+                            {item.setup_mode || item.mode || "SCALP"}
+                          </span>
+                        </div>
+
+                        <div className="bg-slate-950/70 border border-slate-800/80 rounded-lg p-2 space-y-1 text-[11px]">
+                          <div className="flex justify-between">
+                            <span className="text-slate-500">Trigger Zone:</span>
+                            <span className="text-amber-300 font-bold">
+                              {item.trigger_zone_low != null && item.trigger_zone_high != null
+                                ? `${formatSymbolPrice(item.symbol, item.trigger_zone_low)} - ${formatSymbolPrice(item.symbol, item.trigger_zone_high)}`
+                                : entryVal != null
+                                ? formatSymbolPrice(item.symbol, entryVal)
+                                : "-"}
+                            </span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-slate-500">Planned Entry:</span>
+                            <span className="text-white font-bold">
+                              {entryVal != null ? formatSymbolPrice(item.symbol, entryVal) : "-"}
+                            </span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-slate-500">SL / TP2:</span>
+                            <span>
+                              <span className="text-rose-400">
+                                {slVal != null ? formatSymbolPrice(item.symbol, slVal) : "-"}
+                              </span>
+                              <span className="text-slate-600 mx-1">/</span>
+                              <span className="text-emerald-400">
+                                {tp2Val != null ? formatSymbolPrice(item.symbol, tp2Val) : "-"}
+                              </span>
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="text-[11px] text-slate-400 flex justify-between items-center">
+                          <span>Distance: {Math.abs(item.distance_points ?? 0)} pts</span>
+                          {item.lots && <span className="text-slate-300">{item.lots} lots</span>}
+                          <span className="text-emerald-400 font-bold">RR: {item.rr_ratio}R</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             )}
-          </div>
-        )}
 
-        {/* Section B: Developing Radar Cards (Segmented or Side-by-Side Split) */}
-        {radarSubView !== "ACTIONABLE" && (
-          <div className="space-y-4 pt-2">
-            {splitView ? (
-              /* Desktop Side-by-Side View */
+            {/* Developing Radar Cards Grid */}
+            {filteredWatchlist.length === 0 ? (
+              <div className="py-12 text-center text-slate-500 font-mono text-xs">
+                No active setups currently developing. Next packet evaluation scheduled in {selectedInterval}s.
+              </div>
+            ) : splitView ? (
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                 {/* Scalp Column */}
                 <div className="space-y-3">
-                  <div className="flex items-center justify-between text-xs font-bold text-cyan-400 border-b border-slate-800 pb-1.5">
-                    <span className="flex items-center gap-1.5">
-                      <Zap className="w-4 h-4 text-cyan-400" />
-                      <span>⚡ Intraday Scalp Setups ({scalpSetups.length})</span>
-                    </span>
-                    <span className="text-[10px] text-slate-500">TTL: &lt; 2h</span>
+                  <div className="text-xs font-bold font-mono text-cyan-400 uppercase tracking-wider flex items-center gap-1.5 pb-1 border-b border-cyan-900/40">
+                    <Zap className="w-4 h-4" />
+                    <span>⚡ SCALP RADAR ({scalpSetups.length})</span>
                   </div>
                   {scalpSetups.length === 0 ? (
-                    <div className="text-slate-500 text-xs py-6 text-center bg-slate-950/40 rounded-lg">
-                      No developing scalp setups detected.
+                    <div className="py-8 text-center text-slate-600 font-mono text-xs">
+                      No scalping setups on radar.
                     </div>
                   ) : (
                     scalpSetups.map((item: any, idx: number) => renderRadarCard(item, idx, "SCALP"))
@@ -1209,16 +817,13 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
 
                 {/* Swing Column */}
                 <div className="space-y-3">
-                  <div className="flex items-center justify-between text-xs font-bold text-indigo-400 border-b border-slate-800 pb-1.5">
-                    <span className="flex items-center gap-1.5">
-                      <Compass className="w-4 h-4 text-indigo-400" />
-                      <span>🌊 Structural Swing Setups ({swingSetups.length})</span>
-                    </span>
-                    <span className="text-[10px] text-slate-500">TTL: &lt; 24h</span>
+                  <div className="text-xs font-bold font-mono text-indigo-400 uppercase tracking-wider flex items-center gap-1.5 pb-1 border-b border-indigo-900/40">
+                    <Compass className="w-4 h-4" />
+                    <span>🌊 SWING RADAR ({swingSetups.length})</span>
                   </div>
                   {swingSetups.length === 0 ? (
-                    <div className="text-slate-500 text-xs py-6 text-center bg-slate-950/40 rounded-lg">
-                      No developing swing setups detected.
+                    <div className="py-8 text-center text-slate-600 font-mono text-xs">
+                      No swing setups on radar.
                     </div>
                   ) : (
                     swingSetups.map((item: any, idx: number) => renderRadarCard(item, idx, "SWING"))
@@ -1226,8 +831,7 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
                 </div>
               </div>
             ) : (
-              /* Single Tab Filter View */
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 {filteredWatchlist
                   .filter((item: any) => {
                     if (radarSubView === "SCALP") return (item.trade_style || item.setup_mode) === "SCALP";
@@ -1235,224 +839,128 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
                     return true;
                   })
                   .map((item: any, idx: number) =>
-                    renderRadarCard(item, idx, (item.trade_style || item.setup_mode) === "SWING" ? "SWING" : "SCALP")
+                    renderRadarCard(
+                      item,
+                      idx,
+                      (item.trade_style || item.setup_mode) === "SWING" ? "SWING" : "SCALP"
+                    )
                   )}
               </div>
             )}
           </div>
-        )}
-      </div>
 
-      {/* 5. TASK 4: DYNAMIC AI SCANNING INTERVAL & TIMEFRAME PLANNING CONTROLS */}
-      <div className="bg-[#121824] border border-slate-800 rounded-xl p-4">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/80 pb-3 mb-4">
-          <div className="flex items-center gap-2.5">
-            <Sliders className="w-5 h-5 text-blue-400" />
-            <div>
-              <h3 className="font-bold text-white text-sm">
-                DYNAMIC AI SCANNING INTERVAL & TIMEFRAME MATRIX
-              </h3>
-              <p className="text-xs text-slate-400">
-                Hot-reloads scanning interval & multi-timeframe planning rules into scheduler without server restarts.
-              </p>
+          {/* Scanner Cadence & Timeframe Configuration Bar */}
+          <div className="bg-[#0f1623] border border-slate-800/80 rounded-2xl p-4 shadow-xl flex flex-wrap items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <Clock className="w-5 h-5 text-cyan-400" />
+              <div>
+                <div className="font-bold text-white text-xs font-mono">AUTONOMOUS SCANNER CADENCE</div>
+                <div className="text-[10px] text-slate-400">Select multi-pair packet polling interval</div>
+              </div>
             </div>
-          </div>
 
-          <button
-            disabled={isSavingConfig}
-            onClick={handleSaveScannerConfig}
-            className="flex items-center gap-1.5 px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-lg text-xs shadow transition disabled:opacity-50"
-          >
-            <Check className="w-3.5 h-3.5" />
-            <span>Apply Changes</span>
-          </button>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
-          {/* Column A: Scan Cadence Quick Pills */}
-          <div className="space-y-2 bg-slate-950 p-3 rounded-xl border border-slate-800/80">
-            <div className="flex items-center justify-between text-slate-300 font-bold">
-              <span>Scan Cadence</span>
-              <span className="text-cyan-400 font-mono">{selectedInterval}s ({Math.round(selectedInterval / 60)}m)</span>
-            </div>
-            <div className="grid grid-cols-3 gap-1.5">
-              {[
-                { label: "1m", sec: 60 },
-                { label: "3m", sec: 180 },
-                { label: "5m", sec: 300 },
-                { label: "15m", sec: 900 },
-                { label: "30m", sec: 1800 },
-                { label: "1h", sec: 3600 },
-              ].map((pill) => (
+            <div className="flex flex-wrap items-center gap-2">
+              {[30, 60, 120, 300, 900, 1800].map((sec) => (
                 <button
-                  key={pill.sec}
-                  onClick={() => setSelectedInterval(pill.sec)}
-                  className={`py-1.5 rounded-lg font-bold font-mono text-xs transition ${
-                    selectedInterval === pill.sec
-                      ? "bg-blue-600 text-white shadow"
-                      : "bg-slate-900 text-slate-400 hover:text-white"
+                  key={sec}
+                  onClick={() => setSelectedInterval(sec)}
+                  className={`px-3 py-1 rounded-lg text-xs font-mono font-bold transition ${
+                    selectedInterval === sec
+                      ? "bg-cyan-500 text-slate-950 shadow-md"
+                      : "bg-slate-900 text-slate-400 hover:text-white border border-slate-800"
                   }`}
                 >
-                  {pill.label}
+                  {sec < 60 ? `${sec}s` : `${sec / 60}m`}
                 </button>
               ))}
-            </div>
 
-            {/* Countdown Progress Ring Bar */}
-            <div className="pt-2">
-              <div className="flex justify-between text-[10px] text-slate-400 mb-1">
-                <span>Cycle Progress ({selectedSymbol})</span>
-                <span className="font-mono text-amber-400 font-bold">{secsRemaining}s remaining</span>
-              </div>
-              <div className="w-full bg-slate-900 rounded-full h-2 overflow-hidden border border-slate-800">
-                <div
-                  style={{ width: `${progressPct}%` }}
-                  className="bg-cyan-500 h-full rounded-full transition-all duration-1000"
-                />
-              </div>
-            </div>
-          </div>
-
-          {/* Column B: Scalp Timeframe Matrix */}
-          <div className="space-y-2.5 bg-slate-950 p-3 rounded-xl border border-slate-800/80">
-            <div className="font-bold text-cyan-400 flex items-center gap-1.5">
-              <Zap className="w-3.5 h-3.5" />
-              <span>Scalp Timeframe Matrix</span>
-            </div>
-            <div className="space-y-2">
-              <div>
-                <label className="text-[10px] text-slate-500 block mb-1">Planning / Structural Bias TF</label>
-                <select
-                  value={scannerConfig.scalp_planning_tf}
-                  onChange={(e) =>
-                    setScannerConfig({ ...scannerConfig, scalp_planning_tf: e.target.value })
-                  }
-                  className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-white font-mono text-xs"
-                >
-                  <option value="M15">M15 (Default Scalp Bias)</option>
-                  <option value="H1">H1 (Higher Intraday Confluence)</option>
-                  <option value="M30">M30</option>
-                </select>
-              </div>
-              <div>
-                <label className="text-[10px] text-slate-500 block mb-1">Execution Trigger TF</label>
-                <select
-                  value={scannerConfig.scalp_execution_tf}
-                  onChange={(e) =>
-                    setScannerConfig({ ...scannerConfig, scalp_execution_tf: e.target.value })
-                  }
-                  className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-white font-mono text-xs"
-                >
-                  <option value="M5">M5 (Default Fast Scalp Trigger)</option>
-                  <option value="M1">M1 (Micro Structure Sweep)</option>
-                  <option value="M15">M15 (Conservative Trigger)</option>
-                </select>
-              </div>
-            </div>
-          </div>
-
-          {/* Column C: Swing Timeframe Matrix */}
-          <div className="space-y-2.5 bg-slate-950 p-3 rounded-xl border border-slate-800/80">
-            <div className="font-bold text-indigo-400 flex items-center gap-1.5">
-              <Compass className="w-3.5 h-3.5" />
-              <span>Swing Timeframe Matrix</span>
-            </div>
-            <div className="space-y-2">
-              <div>
-                <label className="text-[10px] text-slate-500 block mb-1">Planning / Structural Bias TF</label>
-                <select
-                  value={scannerConfig.swing_planning_tf}
-                  onChange={(e) =>
-                    setScannerConfig({ ...scannerConfig, swing_planning_tf: e.target.value })
-                  }
-                  className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-white font-mono text-xs"
-                >
-                  <option value="H4">H4 (Default Swing Bias)</option>
-                  <option value="D1">D1 (Macro Structure)</option>
-                  <option value="H1">H1</option>
-                </select>
-              </div>
-              <div>
-                <label className="text-[10px] text-slate-500 block mb-1">Execution Trigger TF</label>
-                <select
-                  value={scannerConfig.swing_execution_tf}
-                  onChange={(e) =>
-                    setScannerConfig({ ...scannerConfig, swing_execution_tf: e.target.value })
-                  }
-                  className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-white font-mono text-xs"
-                >
-                  <option value="H1">H1 (Default Swing Trigger)</option>
-                  <option value="M30">M30 (Earlier Retest Entry)</option>
-                  <option value="H4">H4 (Full Candle Close)</option>
-                </select>
-              </div>
+              <button
+                onClick={handleSaveScannerConfig}
+                disabled={isSavingConfig}
+                className="ml-2 px-3.5 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold font-mono text-xs rounded-xl shadow-md transition disabled:opacity-50"
+              >
+                {isSavingConfig ? "Saving..." : "Save Cadence"}
+              </button>
             </div>
           </div>
         </div>
-      </div>
+      )}
 
-      {/* 6. RULES VAULT & AI SUPERVISORY ANALYSIS FEED */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-        {/* Left Column: Self-Learned Rules Vault (5 cols) */}
-        <div className="lg:col-span-5 bg-[#0f1623] border border-slate-800/80 rounded-xl p-4 shadow-lg">
-          <div className="font-bold text-white text-xs flex items-center justify-between mb-2">
-            <div className="flex items-center gap-2">
-              <BookOpen className="w-4 h-4 text-emerald-400" />
-              <span>SELF-LEARNED RULES VAULT ({learnedRules.length})</span>
-            </div>
-            <span className="text-[10px] text-slate-400 font-mono">Immune System</span>
-          </div>
-
-          {/* Asset Class & Symbol Filters */}
-          <div className="flex items-center justify-between gap-2 mb-3 pt-1 border-t border-slate-800/60">
-            <div className="flex items-center gap-1">
-              {(["ALL", "FOREX", "COMMODITIES", "CRYPTO"] as const).map((cls) => (
-                <button
-                  key={cls}
-                  onClick={() => setRulesClassFilter(cls)}
-                  className={`text-[9px] px-1.5 py-0.5 rounded font-mono font-medium transition ${
-                    rulesClassFilter === cls
-                      ? "bg-cyan-500 text-slate-950 font-bold"
-                      : "bg-slate-900 text-slate-400 hover:text-white"
-                  }`}
-                >
-                  {cls === "ALL" ? "All" : cls === "COMMODITIES" ? "Metals" : cls}
-                </button>
-              ))}
-            </div>
-
-            <select
-              value={rulesSymbolFilter}
-              onChange={(e) => setRulesSymbolFilter(e.target.value)}
-              className="bg-slate-900 border border-slate-800 text-slate-200 rounded px-1.5 py-0.5 text-[10px] font-mono focus:outline-none"
-            >
-              <option value="">All 14 Pairs</option>
-              {INSTRUMENTS.map((inst: any) => (
-                <option key={inst.symbol} value={inst.symbol}>
-                  {inst.symbol}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="space-y-2 max-h-[380px] overflow-y-auto pr-1">
-            {learnedRules
-              .filter((r) => {
-                if (rulesSymbolFilter && r.symbol !== rulesSymbolFilter) return false;
-                if (rulesClassFilter !== "ALL") {
-                  const inst = getInstrument(r.symbol);
-                  if (inst.assetClass !== rulesClassFilter) return false;
-                }
-                return true;
-              })
-              .length === 0 ? (
-              <div className="text-slate-500 text-xs py-6 text-center font-mono">
-                No rules match the selected filter criteria.
+      {/* =========================================================================
+          SUB-TAB B: SELF-LEARNED RULES VAULT & FORENSICS
+          ========================================================================= */}
+      {activeSubTab === "RULES" && (
+        <div className="space-y-4">
+          <div className="bg-[#0f1623] border border-slate-800/80 rounded-2xl p-4 shadow-xl space-y-4">
+            {/* Header & Filter Bar */}
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/80 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                  <BookOpen className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white font-mono flex items-center gap-2">
+                    <span>SELF-LEARNED RULES VAULT ({learnedRules.length} Total · {liveRulesCount} LIVE)</span>
+                  </h3>
+                  <p className="text-xs text-slate-400 font-sans">
+                    Post-mortem forensic rules generated automatically from real SL hits to immunize future trades.
+                  </p>
+                </div>
               </div>
-            ) : (
-              learnedRules
+
+              {/* Status & Symbol Filters */}
+              <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
+                {/* Asset Class Filter */}
+                <div className="flex bg-slate-900 p-0.5 rounded-lg border border-slate-800 text-[10px]">
+                  {(["ALL", "FOREX", "COMMODITIES", "CRYPTO"] as const).map((cls) => (
+                    <button
+                      key={cls}
+                      onClick={() => setRulesClassFilter(cls)}
+                      className={`px-2 py-0.5 rounded font-bold transition ${
+                        rulesClassFilter === cls
+                          ? "bg-cyan-500 text-slate-950"
+                          : "text-slate-400 hover:text-white"
+                      }`}
+                    >
+                      {cls}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Symbol Dropdown */}
+                <select
+                  value={rulesSymbolFilter}
+                  onChange={(e) => setRulesSymbolFilter(e.target.value)}
+                  className="bg-slate-900 border border-slate-800 text-slate-200 rounded-lg px-2.5 py-1 text-xs font-mono focus:outline-none"
+                >
+                  <option value="">All 14 Pairs</option>
+                  {INSTRUMENTS.map((inst) => (
+                    <option key={inst.symbol} value={inst.symbol}>
+                      {inst.symbol}
+                    </option>
+                  ))}
+                </select>
+
+                {/* Status Dropdown */}
+                <select
+                  value={rulesStatusFilter}
+                  onChange={(e) => setRulesStatusFilter(e.target.value)}
+                  className="bg-slate-900 border border-slate-800 text-slate-200 rounded-lg px-2.5 py-1 text-xs font-mono focus:outline-none"
+                >
+                  <option value="ALL">All Statuses</option>
+                  <option value="LIVE">LIVE Only ({liveRulesCount})</option>
+                  <option value="LOCKED">LOCKED Only</option>
+                  <option value="RETIRED">RETIRED Only</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Rules Cards Grid */}
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+              {learnedRules
                 .filter((r) => {
                   if (rulesSymbolFilter && r.symbol !== rulesSymbolFilter) return false;
+                  if (rulesStatusFilter !== "ALL" && r.status !== rulesStatusFilter) return false;
                   if (rulesClassFilter !== "ALL") {
                     const inst = getInstrument(r.symbol);
                     if (inst.assetClass !== rulesClassFilter) return false;
@@ -1460,282 +968,474 @@ export const AIBrainTab: React.FC<AIBrainTabProps> = ({
                   return true;
                 })
                 .map((r) => {
-                const isLive = r.status === "LIVE";
-                return (
-                  <div
-                    key={r.id}
-                    className="p-2.5 rounded-lg bg-slate-900/80 border border-slate-800 text-xs"
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="font-mono font-bold text-slate-200">{r.rule_code}</span>
-                      <span
-                        className={`text-[9px] px-1.5 py-0.2 rounded font-black ${
-                          isLive
-                            ? "bg-emerald-950 text-emerald-400 border border-emerald-800"
-                            : "bg-amber-950 text-amber-400 border border-amber-800"
-                        }`}
-                      >
-                        {r.status}
-                      </span>
-                    </div>
-                    <div className="text-[11px] text-slate-400 mt-1">
-                      Symbol: <strong className="text-white">{r.symbol}</strong> | Mode:{" "}
-                      <strong className="text-white">{r.mode}</strong> | Expectancy:{" "}
-                      <strong className="text-emerald-400">+{r.backtest_net_improvement_pct}%</strong>
-                    </div>
+                  const isLive = r.status === "LIVE";
+                  const isLocked = r.status === "LOCKED";
 
-                    <div className="bg-slate-950/90 rounded p-2 mt-1.5 border border-slate-800/80 text-[10px] grid grid-cols-2 gap-1.5 font-mono">
-                      <div>
-                        <span className="text-slate-500">PF: </span>
-                        <span className="text-amber-400 font-bold">{r.profit_factor_before ?? 1.0}</span>
-                        <span className="text-slate-600"> → </span>
-                        <span className="text-emerald-400 font-bold">{r.profit_factor_after ?? 1.5}</span>
-                      </div>
-                      <div>
-                        <span className="text-slate-500">Net R: </span>
-                        <span className="text-cyan-400 font-bold">+{r.net_r_delta ?? 0.0}R</span>
-                      </div>
-                      <div>
-                        <span className="text-slate-500">Winners: </span>
-                        <span className="text-slate-200 font-bold">{r.winners_preserved_pct ?? 100}% kept</span>
-                      </div>
-                      <div>
-                        <span className="text-slate-500">Avoided: </span>
-                        <span className="text-emerald-400 font-bold">${r.avoided_losses_usd ?? 0.0}</span>
-                      </div>
-                    </div>
-
-                    <div className="flex justify-end gap-1.5 mt-2">
-                      {isLive ? (
-                        <button
-                          disabled={ruleActionLoading === r.id}
-                          onClick={() => handleUpdateRuleStatus(r.id, "RETIRED")}
-                          className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] rounded"
-                        >
-                          Retire
-                        </button>
-                      ) : (
-                        <button
-                          disabled={ruleActionLoading === r.id}
-                          onClick={() => handleUpdateRuleStatus(r.id, "LIVE")}
-                          className="px-2 py-0.5 bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-bold rounded"
-                        >
-                          Promote LIVE
-                        </button>
-                      )}
-                      <button
-                        disabled={ruleActionLoading === r.id}
-                        onClick={() => handleUpdateRuleStatus(r.id, "LOCKED")}
-                        className="px-2 py-0.5 bg-blue-900 hover:bg-blue-800 text-blue-200 text-[10px] rounded"
-                      >
-                        Lock
-                      </button>
-                    </div>
-                  </div>
-                );
-              })
-            )}
-          </div>
-        </div>
-
-        {/* Right Column: AI Supervisory Analysis Cards (7 cols) */}
-        <div className="lg:col-span-7 bg-[#121824] border border-slate-800 rounded-xl p-4 flex flex-col">
-          <div className="font-bold text-white text-xs flex items-center justify-between mb-3 border-b border-slate-800 pb-2">
-            <div className="flex items-center gap-2">
-              <Brain className="w-4 h-4 text-purple-400" />
-              <span>GEMINI SUPERVISORY ANALYSIS FEED</span>
-            </div>
-            <span className="text-[10px] text-slate-400 font-mono">Official google-genai SDK</span>
-          </div>
-
-          <div className="flex-1 overflow-y-auto space-y-3 max-h-[380px] pr-1">
-            {reports.length === 0 ? (
-              <div className="text-slate-500 text-xs py-8 text-center">
-                No supervisory reports logged yet.
-              </div>
-            ) : (
-              reports.map((rep) => {
-                const isBuy = rep.decision?.includes("BUY") || rep.decision?.includes("SCALP") || rep.decision?.includes("SWING");
-                return (
-                  <div
-                    key={rep.id}
-                    className="p-3 rounded-xl bg-slate-900/90 border border-slate-800 text-xs space-y-2"
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <span className="font-bold text-white text-sm font-mono">{rep.symbol}</span>
-                        <span
-                          className={`font-black px-2 py-0.5 rounded text-[10px] ${
-                            rep.decision?.startsWith("EXECUTE")
-                              ? "bg-emerald-950 text-emerald-400 border border-emerald-800"
-                              : rep.decision === "WAIT"
-                              ? "bg-slate-800 text-slate-300 border border-slate-700"
-                              : "bg-red-950 text-red-400 border border-red-800"
-                          }`}
-                        >
-                          {rep.decision}
-                        </span>
-                        <span className="text-[11px] text-slate-400">
-                          Regime: <strong className="text-white">{rep.market_regime}</strong>
-                        </span>
-                      </div>
-                      <div className="text-right">
-                        <span className="text-[10px] text-slate-400">{rep.scanned_at_ist}</span>
-                        <div className="text-[11px] font-bold text-blue-400">
-                          Confidence: {fmtConfidence(rep.confidence)}
-                        </div>
-                      </div>
-                    </div>
-
-                    {rep.entry_price && rep.stop_loss ? (
-                      <div className="bg-[#0A0E17] border border-blue-900/40 rounded-lg p-2.5 flex flex-wrap items-center justify-between gap-2 font-mono text-[11px]">
-                        <div className="flex flex-wrap items-center gap-3">
-                          <span className="text-slate-400">Entry: <strong className="text-white">{rep.entry_price}</strong></span>
-                          <span className="text-red-400">SL: <strong className="text-red-300">{rep.stop_loss}</strong></span>
-                          <span className="text-emerald-400">TP1 (+1.5R): <strong className="text-emerald-300">{rep.tp1 ?? "-"}</strong></span>
-                          {rep.tp2 && <span className="text-emerald-500">TP2: <strong className="text-emerald-400">{rep.tp2}</strong></span>}
-                        </div>
-                      </div>
-                    ) : null}
-
-                    {rep.thesis_text && (
-                      <p className="text-slate-300 text-xs leading-relaxed bg-[#0B0E14] p-2.5 rounded-lg border border-slate-800/80">
-                        {rep.thesis_text}
-                      </p>
-                    )}
-                  </div>
-                );
-              })
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* 7. PER-PAIR PATTERN WIN/LOSS MEMORY SCORECARD */}
-      <div className="bg-[#121824] border border-slate-800 rounded-xl p-4 space-y-3">
-        <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-          <div className="flex items-center gap-2">
-            <Brain className="w-5 h-5 text-purple-400" />
-            <div>
-              <h3 className="font-bold text-white text-sm">PER-PAIR PATTERN WIN/LOSS MEMORY</h3>
-              <p className="text-[11px] text-slate-400">
-                Self-learning closed-loop pattern telemetry. Patterns with ≥60% win rate qualify as PROVEN_EDGE; degraded setups isolated as BLOCKED_TRAP.
-              </p>
-            </div>
-          </div>
-          <button
-            onClick={fetchBrainData}
-            className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded-lg"
-          >
-            Refresh Memory
-          </button>
-        </div>
-
-        {patternMemory.length === 0 ? (
-          <div className="text-slate-500 text-xs py-6 text-center">
-            No pattern memory records loaded yet.
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs text-slate-300">
-              <thead className="bg-slate-900/80 text-[10px] text-slate-400 uppercase font-mono border-b border-slate-800">
-                <tr>
-                  <th className="py-2 px-3">Symbol</th>
-                  <th className="py-2 px-3">Pattern Signature</th>
-                  <th className="py-2 px-3">Mode</th>
-                  <th className="py-2 px-3">Trades (W/L)</th>
-                  <th className="py-2 px-3">Win Rate</th>
-                  <th className="py-2 px-3">Avg R:R</th>
-                  <th className="py-2 px-3">Net PnL</th>
-                  <th className="py-2 px-3">Edge Status</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800/60 font-mono text-[11px]">
-                {patternMemory.map((p) => {
-                  const isEdge = p.status === "PROVEN_EDGE";
-                  const isTrap = p.status === "BLOCKED_TRAP";
                   return (
-                    <tr key={p.id} className="hover:bg-slate-900/40 transition">
-                      <td className="py-2.5 px-3 font-bold text-white font-sans">{p.symbol}</td>
-                      <td className="py-2.5 px-3 text-cyan-300 font-bold">{p.pattern_signature}</td>
-                      <td className="py-2.5 px-3 text-slate-400">{p.mode}</td>
-                      <td className="py-2.5 px-3 text-slate-200">
-                        {p.wins}W / {p.losses}L ({p.total_trades})
-                      </td>
-                      <td
-                        className={`py-2.5 px-3 font-bold ${
-                          p.win_rate_pct >= 60.0
-                            ? "text-emerald-400"
-                            : p.win_rate_pct <= 35.0
-                            ? "text-red-400"
-                            : "text-amber-300"
-                        }`}
-                      >
-                        {fmtPct(p.win_rate_pct)}
-                      </td>
-                      <td className="py-2.5 px-3 text-blue-300 font-bold">
-                        {p.avg_r_multiple > 0 ? `+${p.avg_r_multiple}R` : `${p.avg_r_multiple}R`}
-                      </td>
-                      <td
-                        className={`py-2.5 px-3 font-bold ${
-                          p.net_pnl_usd >= 0 ? "text-emerald-400" : "text-red-400"
-                        }`}
-                      >
-                        {p.net_pnl_usd >= 0 ? `+$${p.net_pnl_usd.toFixed(2)}` : `-$${Math.abs(p.net_pnl_usd).toFixed(2)}`}
-                      </td>
-                      <td className="py-2.5 px-3">
+                    <div
+                      key={r.id}
+                      className="p-3.5 rounded-xl bg-slate-900/90 border border-slate-800/90 text-xs font-mono space-y-2 hover:border-slate-700 transition shadow-md"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-white text-xs tracking-tight">{r.rule_code}</span>
                         <span
-                          className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                            isEdge
-                              ? "bg-emerald-950 text-emerald-400 border border-emerald-800"
-                              : isTrap
-                              ? "bg-red-950 text-red-400 border border-red-800 animate-pulse"
-                              : "bg-blue-950 text-blue-400 border border-blue-800"
+                          className={`text-[9px] px-2 py-0.5 rounded-md font-bold ${
+                            isLive
+                              ? "bg-emerald-950 text-emerald-300 border border-emerald-800"
+                              : isLocked
+                              ? "bg-blue-950 text-blue-300 border border-blue-800"
+                              : "bg-slate-800 text-slate-400 border border-slate-700"
                           }`}
                         >
-                          {p.status}
+                          {r.status}
                         </span>
-                      </td>
-                    </tr>
+                      </div>
+
+                      <div className="text-[11px] text-slate-400">
+                        Pair: <strong className="text-white">{r.symbol}</strong> | Mode:{" "}
+                        <strong className="text-white">{r.mode}</strong> | Delta:{" "}
+                        <strong className="text-emerald-400">+{r.backtest_net_improvement_pct}%</strong>
+                      </div>
+
+                      {/* Plain-English Condition */}
+                      <div className="text-[10px] text-slate-300 bg-slate-950/80 p-2 rounded-lg border border-slate-800/80 line-clamp-2 font-sans">
+                        {r.failure_reason || r.rule_description || "Blocks trade entry when high-risk divergence detected."}
+                      </div>
+
+                      {/* Shadow Scorecard Matrix */}
+                      <div className="bg-slate-950 p-2 rounded-lg border border-slate-800 grid grid-cols-2 gap-1.5 text-[10px]">
+                        <div>
+                          <span className="text-slate-500">PF: </span>
+                          <span className="text-amber-400">{r.profit_factor_before ?? 1.0}</span>
+                          <span className="text-slate-600"> → </span>
+                          <span className="text-emerald-400 font-bold">{r.profit_factor_after ?? 1.5}</span>
+                        </div>
+                        <div>
+                          <span className="text-slate-500">Net R: </span>
+                          <span className="text-cyan-400 font-bold">+{r.net_r_delta ?? 0.0}R</span>
+                        </div>
+                        <div>
+                          <span className="text-slate-500">Winners: </span>
+                          <span className="text-slate-200">{r.winners_preserved_pct ?? 100}% kept</span>
+                        </div>
+                        <div>
+                          <span className="text-slate-500">Avoided: </span>
+                          <span className="text-emerald-400 font-bold">${r.avoided_losses_usd ?? 0.0}</span>
+                        </div>
+                      </div>
+
+                      {/* Action Buttons */}
+                      <div className="flex justify-end gap-1.5 pt-1">
+                        {isLive ? (
+                          <button
+                            disabled={ruleActionLoading === r.id}
+                            onClick={() => handleUpdateRuleStatus(r.id, "RETIRED")}
+                            className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] rounded-lg transition"
+                          >
+                            Retire
+                          </button>
+                        ) : (
+                          <button
+                            disabled={ruleActionLoading === r.id}
+                            onClick={() => handleUpdateRuleStatus(r.id, "LIVE")}
+                            className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-bold rounded-lg transition shadow"
+                          >
+                            Promote LIVE
+                          </button>
+                        )}
+                        <button
+                          disabled={ruleActionLoading === r.id}
+                          onClick={() => handleUpdateRuleStatus(r.id, "LOCKED")}
+                          className="px-2.5 py-1 bg-blue-900/60 hover:bg-blue-800 text-blue-200 text-[10px] rounded-lg transition border border-blue-800"
+                        >
+                          Lock
+                        </button>
+                      </div>
+                    </div>
                   );
                 })}
-              </tbody>
-            </table>
+            </div>
           </div>
-        )}
-      </div>
 
-      {/* 8. MODAL: 5-GATE INSTITUTIONAL PROMPT PREVIEW */}
-      {promptModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
-          <div className="bg-[#0f172a] border border-slate-700 rounded-2xl w-full max-w-4xl max-h-[85vh] flex flex-col shadow-2xl">
-            <div className="p-4 border-b border-slate-800 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Code className="w-5 h-5 text-purple-400" />
-                <h3 className="font-bold text-white text-sm">
-                  Institutional 5-Gate Gemini Supervisory System Prompt
-                </h3>
+          {/* Per-Pair Pattern Win/Loss Memory Table */}
+          <div className="bg-[#0f1623] border border-slate-800/80 rounded-2xl p-4 shadow-xl space-y-3">
+            <div className="flex items-center gap-2 border-b border-slate-800/80 pb-2">
+              <Activity className="w-4 h-4 text-cyan-400" />
+              <h4 className="font-bold text-white text-xs font-mono uppercase">
+                Per-Pair Pattern Win/Loss Memory Scorecard
+              </h4>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs font-mono divide-y divide-slate-800">
+                <thead className="bg-[#070b13] text-slate-400 text-[10px] uppercase">
+                  <tr>
+                    <th className="py-2 px-3">Symbol</th>
+                    <th className="py-2 px-3">Pattern Type</th>
+                    <th className="py-2 px-3">Mode</th>
+                    <th className="py-2 px-3">Win Count</th>
+                    <th className="py-2 px-3">Loss Count</th>
+                    <th className="py-2 px-3">Win Rate</th>
+                    <th className="py-2 px-3">Net PnL</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/50 text-slate-300">
+                  {patternMemory.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="py-6 text-center text-slate-500 font-mono">
+                        No pattern memory records populated yet. Real trade closes dynamically hydrate this scorecard.
+                      </td>
+                    </tr>
+                  ) : (
+                    patternMemory.map((p, idx) => (
+                      <tr key={idx} className="hover:bg-slate-800/20">
+                        <td className="py-2 px-3 font-bold text-white">{p.symbol}</td>
+                        <td className="py-2 px-3 text-cyan-300">{p.pattern_type}</td>
+                        <td className="py-2 px-3">{p.trade_mode || "SCALP"}</td>
+                        <td className="py-2 px-3 text-emerald-400">{p.win_count ?? 0}</td>
+                        <td className="py-2 px-3 text-rose-400">{p.loss_count ?? 0}</td>
+                        <td className="py-2 px-3 font-bold text-slate-200">
+                          {p.win_count + p.loss_count > 0
+                            ? ((p.win_count / (p.win_count + p.loss_count)) * 100).toFixed(1)
+                            : "0.0"}%
+                        </td>
+                        <td className={`py-2 px-3 font-bold ${
+                          (p.net_pnl || 0) >= 0 ? "text-emerald-400" : "text-rose-400"
+                        }`}>
+                          {fmtUsd(p.net_pnl || 0, true)}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          SUB-TAB C: STRATEGY LAB & PROMPT STUDIO
+          ========================================================================= */}
+      {activeSubTab === "STRATEGY" && (
+        <div className="space-y-4">
+          {/* Quick Header Bar with Prompt Inspector Button */}
+          <div className="bg-[#0f1623] border border-slate-800/80 rounded-2xl p-4 shadow-xl flex flex-wrap items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 rounded-xl bg-purple-500/10 text-purple-400 border border-purple-500/20">
+                <FileCode className="w-6 h-6" />
               </div>
+              <div>
+                <h3 className="text-base font-bold text-white font-mono">
+                  PYTHON STRATEGY SANDBOX & 5-GATE PROMPT STUDIO
+                </h3>
+                <p className="text-xs text-slate-400">
+                  AST-guarded Python strategy backtesting, XM Ultra Low fee engine, and Gemini Supervisor Prompt Inspector.
+                </p>
+              </div>
+            </div>
+
+            <button
+              onClick={handleOpenPromptModal}
+              className="flex items-center gap-2 px-4 py-2 bg-purple-900/40 hover:bg-purple-900/60 border border-purple-700/60 text-purple-200 text-xs font-mono font-bold rounded-xl transition shadow-lg"
+            >
+              <Sparkles className="w-4 h-4 text-purple-400" />
+              <span>Inspect 5-Gate AI System Prompt</span>
+            </button>
+          </div>
+
+          {/* Strategy Lab Tab Component Embedded */}
+          <StrategyLabTab selectedSymbol={selectedSymbol} />
+        </div>
+      )}
+
+      {/* =========================================================================
+          SUB-TAB D: SYSTEM HYGIENE & TELEGRAM CENTER
+          ========================================================================= */}
+      {activeSubTab === "HYGIENE" && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {/* Column 1: Daily Cache Hygiene */}
+          <div className="bg-[#0f1623] border border-slate-800/80 rounded-2xl p-4 shadow-xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-800/80 pb-3">
+              <div className="flex items-center gap-2.5">
+                <Database className="w-5 h-5 text-cyan-400" />
+                <div>
+                  <h4 className="font-bold text-white text-xs font-mono uppercase">
+                    Daily Cache Hygiene & Memory Control
+                  </h4>
+                  <div className="text-[10px] text-slate-400">
+                    Purges stale tick buffers, radar hashes and market packet caches.
+                  </div>
+                </div>
+              </div>
+
               <button
-                onClick={() => setPromptModalOpen(false)}
-                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
+                onClick={handleClearCacheNow}
+                disabled={cacheClearing}
+                className="px-3 py-1.5 bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-500/40 rounded-xl text-xs font-mono font-bold transition flex items-center gap-1.5 disabled:opacity-50"
               >
-                <X className="w-5 h-5" />
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>{cacheClearing ? "Clearing..." : "Clear Cache Now"}</span>
               </button>
             </div>
-            <div className="p-4 flex-1 overflow-y-auto font-mono text-xs text-slate-300 leading-relaxed bg-[#0b0f19]">
+
+            {/* Cache Telemetry Metrics Grid */}
+            <div className="grid grid-cols-2 gap-3 text-xs font-mono">
+              <div className="p-3 bg-slate-900/80 rounded-xl border border-slate-800/80">
+                <span className="text-slate-500 text-[10px] uppercase">Cached Entries:</span>
+                <div className="text-lg font-bold text-white mt-1">
+                  {cacheStatus?.cached_entries_count ?? 0}
+                </div>
+              </div>
+              <div className="p-3 bg-slate-900/80 rounded-xl border border-slate-800/80">
+                <span className="text-slate-500 text-[10px] uppercase">Buffer Footprint:</span>
+                <div className="text-lg font-bold text-cyan-400 mt-1">
+                  {cacheStatus?.estimated_size_kb ?? 0} KB
+                </div>
+              </div>
+              <div className="p-3 bg-slate-900/80 rounded-xl border border-slate-800/80">
+                <span className="text-slate-500 text-[10px] uppercase">Auto Daily Purge:</span>
+                <div className="flex items-center gap-2 mt-1">
+                  <span className={`w-2 h-2 rounded-full ${
+                    cacheStatus?.auto_daily_enabled ? "bg-emerald-400" : "bg-slate-500"
+                  }`} />
+                  <span className="font-bold text-white">
+                    {cacheStatus?.auto_daily_enabled ? "ENABLED (00:05 UTC)" : "DISABLED"}
+                  </span>
+                </div>
+              </div>
+              <div className="p-3 bg-slate-900/80 rounded-xl border border-slate-800/80">
+                <span className="text-slate-500 text-[10px] uppercase">Health Status:</span>
+                <div className="text-xs font-bold text-emerald-400 mt-1">
+                  {cacheStatus?.health_badge || "OPTIMAL"}
+                </div>
+              </div>
+            </div>
+
+            {/* Auto Policy Toggle */}
+            <div className="pt-2">
+              <button
+                onClick={handleToggleAutoDailyCache}
+                className={`w-full py-2 px-3 rounded-xl text-xs font-mono font-bold transition flex items-center justify-center gap-2 border ${
+                  cacheStatus?.auto_daily_enabled
+                    ? "bg-slate-900 text-slate-300 border-slate-800 hover:bg-slate-800"
+                    : "bg-emerald-600 hover:bg-emerald-500 text-white border-transparent"
+                }`}
+              >
+                <CheckCircle2 className="w-4 h-4" />
+                <span>
+                  {cacheStatus?.auto_daily_enabled
+                    ? "Disable Automated Daily Purge"
+                    : "Enable Automated Daily Purge (00:05 UTC / 05:35 IST)"}
+                </span>
+              </button>
+            </div>
+          </div>
+
+          {/* Column 2: Telegram Alert Center */}
+          <div className="bg-[#0f1623] border border-slate-800/80 rounded-2xl p-4 shadow-xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-800/80 pb-3">
+              <div className="flex items-center gap-2.5">
+                <Bell className="w-5 h-5 text-blue-400" />
+                <div>
+                  <h4 className="font-bold text-white text-xs font-mono uppercase">
+                    Telegram Notification Center
+                  </h4>
+                  <div className="text-[10px] text-slate-400">
+                    HTML-formatted instant alerts for pre-triggers, orders & closes.
+                  </div>
+                </div>
+              </div>
+
+              <button
+                onClick={handleSaveTelegramConfig}
+                disabled={telegramSaving}
+                className="px-3 py-1.5 bg-cyan-500 hover:bg-cyan-400 text-slate-950 rounded-xl text-xs font-mono font-bold transition flex items-center gap-1.5 shadow disabled:opacity-50"
+              >
+                <Save className="w-3.5 h-3.5" />
+                <span>{telegramSaving ? "Saving..." : "Save Telegram"}</span>
+              </button>
+            </div>
+
+            {/* Form Inputs: Bot Token & Chat ID */}
+            <div className="space-y-3 text-xs font-mono">
+              <div>
+                <label className="text-[10px] text-slate-400 uppercase">Admin Chat ID / Channel ID</label>
+                <input
+                  type="text"
+                  placeholder="e.g. -100123456789 or 987654321"
+                  value={chatIdInput}
+                  onChange={(e) => setChatIdInput(e.target.value)}
+                  className="w-full mt-1 px-3 py-1.5 bg-slate-900 border border-slate-800 rounded-lg text-white focus:outline-none focus:border-cyan-500"
+                />
+              </div>
+
+              <div>
+                <div className="flex justify-between items-center text-[10px] text-slate-400 uppercase">
+                  <span>Bot Token</span>
+                  <button
+                    onClick={() => setShowTokenInput((v) => !v)}
+                    className="text-cyan-400 hover:underline"
+                  >
+                    {showTokenInput ? "Cancel" : "Update Token"}
+                  </button>
+                </div>
+                {showTokenInput ? (
+                  <input
+                    type="password"
+                    placeholder="Enter new Telegram Bot Token..."
+                    value={newTokenInput}
+                    onChange={(e) => setNewTokenInput(e.target.value)}
+                    className="w-full mt-1 px-3 py-1.5 bg-slate-900 border border-slate-800 rounded-lg text-white focus:outline-none focus:border-cyan-500"
+                  />
+                ) : (
+                  <div className="w-full mt-1 px-3 py-1.5 bg-slate-950 border border-slate-800/80 rounded-lg text-slate-400">
+                    {telegramConfig.bot_token_masked || "Configured in backend (.env / MySQL)"}
+                  </div>
+                )}
+              </div>
+
+              {/* Event Toggles Matrix */}
+              <div className="pt-2 border-t border-slate-800/80 space-y-2">
+                <span className="text-[10px] text-slate-400 uppercase font-bold">Subscribed Events</span>
+                <div className="grid grid-cols-2 gap-2 text-[11px]">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={telegramConfig.notify_pre_trigger}
+                      onChange={(e) =>
+                        setTelegramConfig({ ...telegramConfig, notify_pre_trigger: e.target.checked })
+                      }
+                      className="rounded bg-slate-900 border-slate-800 text-cyan-500 focus:ring-0"
+                    />
+                    <span>Pre-Trigger Radar</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={telegramConfig.notify_executions}
+                      onChange={(e) =>
+                        setTelegramConfig({ ...telegramConfig, notify_executions: e.target.checked })
+                      }
+                      className="rounded bg-slate-900 border-slate-800 text-cyan-500 focus:ring-0"
+                    />
+                    <span>Order Executions</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={telegramConfig.notify_be_and_partials}
+                      onChange={(e) =>
+                        setTelegramConfig({ ...telegramConfig, notify_be_and_partials: e.target.checked })
+                      }
+                      className="rounded bg-slate-900 border-slate-800 text-cyan-500 focus:ring-0"
+                    />
+                    <span>BE & Partials (+1.5R)</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={telegramConfig.notify_closures}
+                      onChange={(e) =>
+                        setTelegramConfig({ ...telegramConfig, notify_closures: e.target.checked })
+                      }
+                      className="rounded bg-slate-900 border-slate-800 text-cyan-500 focus:ring-0"
+                    />
+                    <span>Trade Closes & Scorecard</span>
+                  </label>
+                </div>
+              </div>
+
+              {/* Template Test Simulator */}
+              <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between gap-2">
+                <select
+                  value={testTemplate}
+                  onChange={(e) => setTestTemplate(e.target.value)}
+                  className="bg-slate-900 border border-slate-800 text-slate-200 rounded-lg px-2.5 py-1 text-xs focus:outline-none"
+                >
+                  <option value="PRE_TRIGGER">1. Pre-Trigger Radar Alert</option>
+                  <option value="EXECUTION">2. Order Executed Alert</option>
+                  <option value="BREAKEVEN">3. Break-Even Profit Lock</option>
+                  <option value="PARTIAL_TP1">4. Partial Scale-Out TP1</option>
+                  <option value="CLOSE">5. Trade Closed & Scorecard</option>
+                  <option value="GUARDRAIL">6. Guardrail Circuit Breaker</option>
+                </select>
+
+                <button
+                  disabled={testSending}
+                  onClick={handleSendTestPreview}
+                  className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-cyan-800/60 rounded-lg text-xs font-bold transition flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  <Send className={`w-3 h-3 ${testSending ? "animate-spin" : ""}`} />
+                  <span>Send Test Preview</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          MODAL: 5-GATE INSTITUTIONAL PROMPT INSPECTOR
+          ========================================================================= */}
+      {promptModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#0f1623] border border-slate-700 rounded-2xl max-w-4xl w-full max-h-[85vh] flex flex-col shadow-2xl overflow-hidden font-sans">
+            {/* Modal Header */}
+            <div className="p-4 border-b border-slate-800 flex items-center justify-between bg-[#0a0f19]">
+              <div className="flex items-center gap-2.5">
+                <Sparkles className="w-5 h-5 text-purple-400" />
+                <h3 className="font-bold text-white text-sm font-mono">
+                  INSTITUTIONAL 5-GATE GEMINI SUPERVISOR SYSTEM PROMPT
+                </h3>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleCopyPrompt}
+                  className="flex items-center gap-1.5 px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-mono font-semibold transition"
+                >
+                  {copiedPrompt ? (
+                    <>
+                      <Check className="w-3.5 h-3.5 text-emerald-400" />
+                      <span className="text-emerald-400">Copied!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3.5 h-3.5 text-slate-400" />
+                      <span>Copy Prompt</span>
+                    </>
+                  )}
+                </button>
+
+                <button
+                  onClick={() => setPromptModalOpen(false)}
+                  className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Modal Content */}
+            <div className="p-4 overflow-y-auto flex-1 font-mono text-xs bg-[#080c14] space-y-3">
               {promptLoading ? (
-                <div className="py-12 text-center text-slate-400">Loading prompt preview...</div>
+                <div className="py-20 text-center text-slate-500">Loading prompt schema...</div>
               ) : (
-                <pre className="whitespace-pre-wrap">{promptPreviewText}</pre>
+                <pre className="text-slate-300 whitespace-pre-wrap leading-relaxed select-text font-mono text-[11px] bg-slate-950 p-4 rounded-xl border border-slate-800/80">
+                  {promptPreviewText}
+                </pre>
               )}
             </div>
-            <div className="p-3 border-t border-slate-800 flex justify-end">
+
+            {/* Modal Footer */}
+            <div className="p-3 border-t border-slate-800 bg-[#0a0f19] flex justify-between items-center text-[11px] text-slate-500 font-mono">
+              <span>Deterministic JSON audit enforced via Pydantic response schema.</span>
               <button
                 onClick={() => setPromptModalOpen(false)}
-                className="px-4 py-1.5 bg-slate-800 hover:bg-slate-700 text-white font-bold rounded-lg text-xs"
+                className="px-3 py-1 bg-slate-800 text-slate-300 rounded-lg hover:text-white"
               >
-                Close Preview
+                Close
               </button>
             </div>
           </div>

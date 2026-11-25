@@ -54,10 +54,12 @@ async def fetch_mt5_ohlcv(symbol: str, timeframe: str = "H1", count: int = 500) 
 
     try:
         import MetaTrader5 as mt5
+        from backend.app.core.instruments import resolve_marketwatch_symbol
 
         tf_val = TIMEFRAME_MAP.get(timeframe.upper(), mt5.TIMEFRAME_H1)
+        mw_sym = resolve_marketwatch_symbol(symbol)
         clean_sym = symbol.rstrip("#")
-        candidates = [symbol, clean_sym, f"{clean_sym}#"]
+        candidates = [mw_sym, symbol, clean_sym, f"{clean_sym}#"]
         seen = set()
         ordered_candidates = []
         for s in candidates:

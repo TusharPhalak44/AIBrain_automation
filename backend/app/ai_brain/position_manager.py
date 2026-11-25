@@ -130,62 +130,96 @@ class PositionManager:
                             cur_sl = target_be_sl
 
                     # -------------------------------------------------------------
-                    # RULE 2: 50% Partial Scale-Out + Trail at +1.5R
+                    # RULE 2: 60% Partial Scale-Out + Trail at +1.5R (Micro-Lot Safe)
                     # -------------------------------------------------------------
-                    if current_r >= 1.5 and trade.status == "OPEN" and pos.volume >= (2 * vol_min):
-                        # Close 50% volume at market
-                        half_vol = round((pos.volume * 0.5) / vol_step) * vol_step
-                        if half_vol >= vol_min:
-                            filling = mt5.ORDER_FILLING_IOC
-                            if info and hasattr(info, "filling_mode"):
-                                fm = info.filling_mode
-                                if fm & 2:
-                                    filling = mt5.ORDER_FILLING_IOC
-                                elif fm & 1:
-                                    filling = mt5.ORDER_FILLING_FOK
-                                else:
-                                    filling = mt5.ORDER_FILLING_RETURN
+                    if current_r >= 1.5 and trade.status == "OPEN":
+                        # Micro-Lot Tier: cannot split min volume (e.g. 0.01 lot) -> lock +0.50R SL
+                        if pos.volume <= vol_min:
+                            lock_buffer = 0.50 * initial_sl_dist
+                            lock_sl = round(entry_p + lock_buffer if is_buy else entry_p - lock_buffer, digits)
+                            should_lock = False
+                            if is_buy and cur_sl < lock_sl:
+                                should_lock = True
+                            elif not is_buy and (cur_sl == 0.0 or cur_sl > lock_sl):
+                                should_lock = True
 
-                            close_action = mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY
-                            close_price = tick.bid if is_buy else tick.ask
-
-                            close_req = {
-                                "action": mt5.TRADE_ACTION_DEAL,
-                                "position": pos.ticket,
-                                "symbol": sym,
-                                "volume": float(half_vol),
-                                "type": close_action,
-                                "price": round(close_price, digits),
-                                "deviation": 20,
-                                "magic": pos.magic,
-                                "type_filling": filling,
-                                "comment": "PARTIAL_TP1_50PCT",
-                            }
-                            c_res = mt5.order_send(close_req)
-                            if c_res and c_res.retcode == 10009:
-                                # Trail stop behind +1.0R structure
-                                trail_buffer = 1.0 * initial_sl_dist
-                                trail_sl = round(entry_p + trail_buffer if is_buy else entry_p - trail_buffer, digits)
-
+                            if should_lock:
                                 sl_req = {
                                     "action": mt5.TRADE_ACTION_SLTP,
                                     "position": pos.ticket,
                                     "symbol": sym,
-                                    "sl": trail_sl,
+                                    "sl": lock_sl,
                                     "tp": cur_tp,
                                 }
-                                mt5.order_send(sl_req)
+                                res_lock = mt5.order_send(sl_req)
+                                if res_lock and res_lock.retcode == 10009:
+                                    modifications.append({
+                                        "action": "MICRO_LOT_PROFIT_LOCK",
+                                        "trade_id": trade.id,
+                                        "ticket": pos.ticket,
+                                        "symbol": sym,
+                                        "new_sl": lock_sl,
+                                        "current_r": round(current_r, 2),
+                                    })
+                        else:
+                            # Standard Tier: Close 60% volume snapped cleanly to volume_step
+                            target_close = round((pos.volume * 0.60) / vol_step) * vol_step
+                            target_close = round(target_close, 2)
+                            rem_vol = round(pos.volume - target_close, 2)
+                            if rem_vol < vol_min:
+                                target_close = round(pos.volume - vol_min, 2)
 
-                                modifications.append({
-                                    "action": "PARTIAL_SCALE_OUT_50",
-                                    "trade_id": trade.id,
-                                    "ticket": pos.ticket,
+                            if target_close >= vol_min:
+                                filling = mt5.ORDER_FILLING_IOC
+                                if info and hasattr(info, "filling_mode"):
+                                    fm = info.filling_mode
+                                    if fm & 2:
+                                        filling = mt5.ORDER_FILLING_IOC
+                                    elif fm & 1:
+                                        filling = mt5.ORDER_FILLING_FOK
+                                    else:
+                                        filling = mt5.ORDER_FILLING_RETURN
+
+                                close_action = mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY
+                                close_price = tick.bid if is_buy else tick.ask
+
+                                close_req = {
+                                    "action": mt5.TRADE_ACTION_DEAL,
+                                    "position": pos.ticket,
                                     "symbol": sym,
-                                    "volume_closed": float(half_vol),
-                                    "remaining_volume": float(pos.volume - half_vol),
-                                    "trailed_sl": trail_sl,
-                                    "current_r": round(current_r, 2),
-                                })
+                                    "volume": float(target_close),
+                                    "type": close_action,
+                                    "price": round(close_price, digits),
+                                    "deviation": 20,
+                                    "magic": pos.magic,
+                                    "type_filling": filling,
+                                    "comment": "PARTIAL_TP1_60PCT",
+                                }
+                                c_res = mt5.order_send(close_req)
+                                if c_res and c_res.retcode == 10009:
+                                    # Trail stop behind +1.0R structure
+                                    trail_buffer = 1.0 * initial_sl_dist
+                                    trail_sl = round(entry_p + trail_buffer if is_buy else entry_p - trail_buffer, digits)
+
+                                    sl_req = {
+                                        "action": mt5.TRADE_ACTION_SLTP,
+                                        "position": pos.ticket,
+                                        "symbol": sym,
+                                        "sl": trail_sl,
+                                        "tp": cur_tp,
+                                    }
+                                    mt5.order_send(sl_req)
+
+                                    modifications.append({
+                                        "action": "PARTIAL_SCALE_OUT_60",
+                                        "trade_id": trade.id,
+                                        "ticket": pos.ticket,
+                                        "symbol": sym,
+                                        "volume_closed": float(target_close),
+                                        "remaining_volume": float(round(pos.volume - target_close, 2)),
+                                        "trailed_sl": trail_sl,
+                                        "current_r": round(current_r, 2),
+                                    })
 
                 return modifications
 
@@ -226,11 +260,23 @@ class PositionManager:
                             )
                         except Exception as te:
                             logger.debug(f"Breakeven Telegram alert note: {te}")
-                    elif act["action"] == "PARTIAL_SCALE_OUT_50":
+                    elif act["action"] == "MICRO_LOT_PROFIT_LOCK":
+                        t_row.sl = Decimal(str(act["new_sl"]))
+                        logger.info(f"Micro-lot +0.50R profit lock executed for trade #{tid} ({act['symbol']}) at {act['new_sl']}")
+                        await manager.broadcast({
+                            "type": "SL_MOVED_PROFIT_LOCK",
+                            "trade_id": tid,
+                            "symbol": act["symbol"],
+                            "ticket": act["ticket"],
+                            "new_sl": act["new_sl"],
+                            "current_r": act["current_r"],
+                            "timestamp_ist": to_ist_str(now_utc()),
+                        })
+                    elif act["action"] in ("PARTIAL_SCALE_OUT_50", "PARTIAL_SCALE_OUT_60"):
                         t_row.status = "PARTIAL_TP1"
                         t_row.lots = Decimal(str(act["remaining_volume"]))
                         t_row.sl = Decimal(str(act["trailed_sl"]))
-                        logger.info(f"Partial TP1 50% scale-out executed for trade #{tid} ({act['symbol']}) at +{act['current_r']}R. Rem: {act['remaining_volume']} lots.")
+                        logger.info(f"Partial TP1 scale-out executed for trade #{tid} ({act['symbol']}) at +{act['current_r']}R. Rem: {act['remaining_volume']} lots.")
                         await manager.broadcast({
                             "type": "PARTIAL_TP_EXECUTED",
                             "trade_id": tid,

@@ -56,8 +56,8 @@ async def get_candles_and_overlays(
             "message": f"No candle data returned from MT5 for {resolved_sym} on {tf_upper}.",
         }
 
-    # 3. Format candles for TradingView Lightweight Charts (Unix timestamp in seconds)
-    candles: List[Dict[str, Any]] = []
+    # 3. Format candles for TradingView Lightweight Charts (Unix timestamp in seconds, strictly ascending & unique)
+    candles_by_time: Dict[int, Dict[str, Any]] = {}
     for _, row in df.iterrows():
         ts_val = row["time"]
         if hasattr(ts_val, "timestamp"):
@@ -65,14 +65,16 @@ async def get_candles_and_overlays(
         else:
             ts_sec = int(ts_val)
 
-        candles.append({
+        candles_by_time[ts_sec] = {
             "time": ts_sec,
             "open": round(float(row["open"]), 5),
             "high": round(float(row["high"]), 5),
             "low": round(float(row["low"]), 5),
             "close": round(float(row["close"]), 5),
             "volume": float(row.get("tick_volume", row.get("volume", 0.0))),
-        })
+        }
+
+    candles: List[Dict[str, Any]] = [candles_by_time[k] for k in sorted(candles_by_time.keys())]
 
     # 4. Compute price-action overlays
     highs = swing_highs(df, left=3, right=3).dropna().tail(5).tolist()

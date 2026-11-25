@@ -193,23 +193,43 @@ export const api = {
       const q = symbol ? `?symbol=${encodeURIComponent(symbol)}` : "";
       return request<any>(`/api/ai/news${q}`);
     },
-    getRules: (params: { symbol?: string; status?: string; mode?: string } = {}) => {
+    getRules: async (params: { symbol?: string; status?: string; mode?: string } = {}) => {
       const q = new URLSearchParams();
       if (params.symbol) q.append("symbol", params.symbol);
       if (params.status) q.append("status", params.status);
       if (params.mode) q.append("mode", params.mode);
-      return request<any[]>(`/api/ai/rules?${q.toString()}`);
+      const res = await request<any>(`/api/ai-brain/rules?${q.toString()}`);
+      if (Array.isArray(res)) return res;
+      if (res && Array.isArray(res.rules)) return res.rules;
+      return [];
+    },
+    getRulesVault: (params: { symbol?: string; status?: string; mode?: string } = {}) => {
+      const q = new URLSearchParams();
+      if (params.symbol) q.append("symbol", params.symbol);
+      if (params.status) q.append("status", params.status);
+      if (params.mode) q.append("mode", params.mode);
+      return request<any>(`/api/ai-brain/rules?${q.toString()}`);
     },
     updateRuleStatus: (ruleId: number, status: string) =>
-      request<any>(`/api/ai/rules/${ruleId}/status`, {
+      request<any>(`/api/ai-brain/rules/${ruleId}/status`, {
         method: "POST",
         body: JSON.stringify({ status }),
+      }),
+    deleteRule: (ruleId: number) =>
+      request<any>(`/api/ai-brain/rules/${ruleId}`, {
+        method: "DELETE",
+      }),
+    resetCircuitBreaker: () =>
+      request<any>("/api/ai-brain/circuit-breaker/reset", {
+        method: "POST",
       }),
     runForensics: (tradeId: number) =>
       request<any>(`/api/ai/forensics/${tradeId}`, {
         method: "POST",
       }),
-    getUpcomingSetups: () => request<any>("/api/ai/upcoming-setups"),
+    getUpcomingSetups: () => request<any>("/api/ai-brain/upcoming-setups"),
+    getStatus: () => request<any>("/api/ai-brain/status"),
+    getRiskGuardrails: () => request<any>("/api/ai-brain/risk-guardrails"),
     getPatternMemory: (symbol?: string) => {
       const q = symbol ? `?symbol=${encodeURIComponent(symbol)}` : "";
       return request<any[]>(`/api/ai/pattern-memory${q}`);
@@ -233,6 +253,7 @@ export const api = {
       swing_planning_tf?: string;
       swing_execution_tf?: string;
       pair_enabled_map?: Record<string, boolean>;
+      pair_configs?: Record<string, any>;
     }) =>
       request<any>("/api/ai/scanner/config", {
         method: "POST",
@@ -248,7 +269,25 @@ export const api = {
       request<any>("/api/ai-brain/reconcile-mt5", {
         method: "POST",
       }),
-    getRiskGuardrails: () => request<any>("/api/ai-brain/risk-guardrails"),
+    getSavedStrategies: () => request<any[]>("/api/ai-brain/saved-strategies"),
+    createSavedStrategy: (payload: any) =>
+      request<any>("/api/ai-brain/saved-strategies", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      }),
+    applySavedStrategy: (id: number, payload?: any) =>
+      request<any>(`/api/ai-brain/saved-strategies/${id}/apply`, {
+        method: "POST",
+        body: JSON.stringify(payload || {}),
+      }),
+    deleteSavedStrategy: (id: number) =>
+      request<any>(`/api/ai-brain/saved-strategies/${id}`, {
+        method: "DELETE",
+      }),
+  },
+
+  get aiBrain() {
+    return this.ai;
   },
 
   strategies: {

@@ -109,7 +109,16 @@ def reconcile_open_trades_with_mt5(db: Optional[Session] = None) -> Dict[str, An
         for trade in open_db_trades:
             pos_id = trade.position_id
             if pos_id in live_pos_ids:
-                # Still truly open on broker
+                # Still truly open on broker - sync volume if partial scale-out occurred
+                live_p = next((p for p in live_positions if p.ticket == pos_id), None)
+                if live_p:
+                    live_vol = float(live_p.volume)
+                    curr_lots = float(trade.lots)
+                    init_lots = float(trade.initial_lots or trade.lots)
+                    if live_vol < init_lots and live_vol < curr_lots:
+                        trade.lots = Decimal(str(live_vol))
+                        trade.status = "PARTIAL_TP1"
+                        db.commit()
                 continue
 
             # Position is NO LONGER open on broker -> must reconcile and close

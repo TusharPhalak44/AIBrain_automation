@@ -1,35 +1,81 @@
-import React, { useState, useEffect } from "react";
-import {
-  LayoutDashboard,
-  Brain,
-  BookOpen,
-  BarChart3,
-  FlaskConical,
-  Command,
-} from "lucide-react";
+import React, { useState, useEffect, useCallback } from "react";
 import { useLiveStore } from "./hooks/useLiveStore";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { TopCommandBar } from "./components/TopCommandBar";
+import { LeftNavRail, NavWorkspace } from "./components/common/LeftNavRail";
 import { CockpitTab } from "./components/tabs/CockpitTab";
 import { AIBrainTab } from "./components/tabs/AIBrainTab";
 import { TradeBookTab } from "./components/tabs/TradeBookTab";
-import { StrategyLabTab } from "./components/tabs/StrategyLabTab";
 import { UsageAnalyticsTab } from "./components/tabs/UsageAnalyticsTab";
+import { RiskPairSettingsTab } from "./components/tabs/RiskPairSettingsTab";
 import { SettingsModal } from "./components/tabs/SettingsModal";
 import { QuickSymbolSwitcher } from "./components/common/QuickSymbolSwitcher";
 import { ToastProvider, useToast } from "./components/Toast";
 import { getInstrument, getSymbolSession } from "./constants/instruments";
-
-type ActiveTab = "COCKPIT" | "AI_SUPERVISOR" | "TRADE_BOOK" | "STRATEGY_LAB" | "USAGE_BILLING";
+import { api } from "./services/api";
 
 const AppContent: React.FC = () => {
   const store = useLiveStore();
-  const [currentTab, setCurrentTab] = useState<ActiveTab>("COCKPIT");
+  const [currentWorkspace, setCurrentWorkspace] = useState<NavWorkspace>("COCKPIT");
+  const [isRailCollapsed, setIsRailCollapsed] = useState<boolean>(() => {
+    return localStorage.getItem("xm_nav_rail_collapsed") === "true";
+  });
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isQuickSwitcherOpen, setIsQuickSwitcherOpen] = useState(false);
+  const [guardrails, setGuardrails] = useState<any>(null);
+  const [liveRulesCount, setLiveRulesCount] = useState<number>(171);
   const toast = useToast();
 
-  // Keyboard shortcut listener for Ctrl+K Quick Switcher
+  const handleToggleRail = () => {
+    setIsRailCollapsed((prev) => {
+      const next = !prev;
+      localStorage.setItem("xm_nav_rail_collapsed", String(next));
+      return next;
+    });
+  };
+
+  const fetchGuardrails = useCallback(async () => {
+    try {
+      const [grRes, rulesRes] = await Promise.all([
+        api.ai.getRiskGuardrails(),
+        api.ai.getRulesVault().catch(() => null),
+      ]);
+      if (grRes) setGuardrails(grRes);
+      if (rulesRes && typeof rulesRes.live_count === "number") {
+        setLiveRulesCount(rulesRes.live_count);
+      }
+    } catch {
+      // ignore background error
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchGuardrails();
+    const iv = setInterval(fetchGuardrails, 6000);
+    return () => clearInterval(iv);
+  }, [fetchGuardrails]);
+
+  const handleScanNow = async () => {
+    try {
+      const res = await api.ai.scanAll();
+      toast.info("Autonomous Scan Triggered", res?.message || "14-pair market packet evaluation dispatched.");
+    } catch (e: any) {
+      toast.error("Scan Failed", e.message || String(e));
+    }
+  };
+
+  const handleReconcileMT5 = async () => {
+    try {
+      const res = await api.ai.reconcileMT5();
+      toast.success("MT5 Reconciled", res?.message || "All positions synchronized with MT5 deals.");
+      store.fetchLiveSnapshot();
+      fetchGuardrails();
+    } catch (e: any) {
+      toast.error("Reconcile Failed", e.message || String(e));
+    }
+  };
+
+  // Global Keyboard shortcut listener for Ctrl+K Quick Command Palette
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
@@ -69,13 +115,13 @@ const AppContent: React.FC = () => {
   };
 
   const activeInst = getInstrument(store.selectedSymbol);
-  const activeSessionTag = getSymbolSession(store.selectedSymbol);
+  const activeSessionTag = guardrails?.active_session || getSymbolSession(store.selectedSymbol);
   const pairSched = store.pairSchedules[store.selectedSymbol];
-  const nextScanSec = pairSched?.next_scan_seconds ?? pairSched?.seconds_remaining;
+  const nextScanSec = guardrails?.next_scan_seconds ?? pairSched?.next_scan_seconds ?? pairSched?.seconds_remaining ?? 180;
 
   return (
-    <div className="min-h-screen bg-[#080c14] text-slate-100 flex flex-col font-sans selection:bg-cyan-500/30">
-      {/* Top Fixed Command & Risk Bar */}
+    <div className="h-screen w-screen bg-[#080c14] text-slate-100 flex flex-col font-sans selection:bg-cyan-500/30 overflow-hidden">
+      {/* Tier-1 Persistent Top Command & Safety Header */}
       <TopCommandBar
         accountType={store.accountType}
         executionMode={store.executionMode}
@@ -89,7 +135,7 @@ const AppContent: React.FC = () => {
         dailyDdPct={store.dailyDdPct}
         weeklyDdPct={store.weeklyDdPct}
         riskState={store.riskState}
-        openExposureCount={store.openPositions.length}
+        openExposureCount={guardrails?.open_positions_count ?? store.openPositions.length}
         activeSession={activeSessionTag}
         nextScanSeconds={nextScanSec}
         onSwitchAccount={handleSwitchAccount}
@@ -97,141 +143,88 @@ const AppContent: React.FC = () => {
         onPanicFlatten={handlePanicFlatten}
         onOpenSettings={() => setIsSettingsOpen(true)}
         onOpenQuickSwitcher={() => setIsQuickSwitcherOpen(true)}
+        onScanNow={handleScanNow}
+        onReconcileMT5={handleReconcileMT5}
+        circuitBreakerStatus={guardrails?.circuit_breaker}
+        openRiskPct={guardrails?.open_risk_pct}
       />
 
-      {/* Primary Navigation Ribbon */}
-      <nav className="bg-[#0b101b] border-b border-slate-800/80 px-4 flex items-center justify-between text-xs font-semibold">
-        <div className="flex items-center gap-1 overflow-x-auto scrollbar-none">
-          <button
-            onClick={() => setCurrentTab("COCKPIT")}
-            className={`flex items-center gap-2 py-2.5 px-3.5 border-b-2 transition font-mono ${
-              currentTab === "COCKPIT"
-                ? "border-cyan-500 text-cyan-400 font-bold bg-cyan-950/20"
-                : "border-transparent text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            <LayoutDashboard className="w-4 h-4" />
-            <span>TERMINAL COCKPIT</span>
-          </button>
+      {/* Main App Container: Left Navigation Rail + Active Workspace View */}
+      <div className="flex-1 flex overflow-hidden relative">
+        {/* Persistent Collapsible Left Navigation Rail */}
+        <LeftNavRail
+          currentWorkspace={currentWorkspace}
+          onSelectWorkspace={setCurrentWorkspace}
+          isCollapsed={isRailCollapsed}
+          onToggleCollapse={handleToggleRail}
+          liveRulesCount={liveRulesCount}
+          openPositionsCount={store.openPositions.length}
+          isMt5Connected={store.isMt5Connected}
+          dbHealthy={store.dbHealthy}
+          isWsConnected={store.isWsConnected}
+        />
 
-          <button
-            onClick={() => setCurrentTab("AI_SUPERVISOR")}
-            className={`flex items-center gap-2 py-2.5 px-3.5 border-b-2 transition font-mono ${
-              currentTab === "AI_SUPERVISOR"
-                ? "border-cyan-500 text-cyan-400 font-bold bg-cyan-950/20"
-                : "border-transparent text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            <Brain className="w-4 h-4" />
-            <span>GEMINI SUPERVISOR & RULES</span>
-          </button>
+        {/* Center / Main Scrollable Content Area */}
+        <main className="flex-1 overflow-y-auto p-3.5 bg-[#080c14] focus:outline-none">
+          <ErrorBoundary>
+            {/* Workspace 1: Terminal Cockpit */}
+            {currentWorkspace === "COCKPIT" && (
+              <CockpitTab
+                selectedSymbol={store.selectedSymbol}
+                selectedTimeframe={store.selectedTimeframe}
+                isMt5Connected={store.isMt5Connected}
+                executionMode={store.executionMode}
+                openPositions={store.openPositions}
+                pendingOrders={store.pendingOrders}
+                plannedTrades={store.plannedTrades}
+                pairSchedules={store.pairSchedules}
+                quotes={store.quotes}
+                equity={store.equity}
+                balance={store.balance}
+                onSelectSymbol={store.setSelectedSymbol}
+                onSelectTimeframe={store.setSelectedTimeframe}
+                onApproveCopilot={store.approveCopilot}
+                onRejectCopilot={store.rejectCopilot}
+              />
+            )}
 
-          <button
-            onClick={() => setCurrentTab("TRADE_BOOK")}
-            className={`flex items-center gap-2 py-2.5 px-3.5 border-b-2 transition font-mono ${
-              currentTab === "TRADE_BOOK"
-                ? "border-cyan-500 text-cyan-400 font-bold bg-cyan-950/20"
-                : "border-transparent text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            <BookOpen className="w-4 h-4" />
-            <span>TRADE BOOK & FORENSICS</span>
-          </button>
+            {/* Workspace 2: AI Brain & Rules */}
+            {currentWorkspace === "AI_SUPERVISOR" && (
+              <AIBrainTab
+                selectedSymbol={store.selectedSymbol}
+                pairSchedules={store.pairSchedules}
+              />
+            )}
 
-          <button
-            onClick={() => setCurrentTab("STRATEGY_LAB")}
-            className={`flex items-center gap-2 py-2.5 px-3.5 border-b-2 transition font-mono ${
-              currentTab === "STRATEGY_LAB"
-                ? "border-cyan-500 text-cyan-400 font-bold bg-cyan-950/20"
-                : "border-transparent text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            <FlaskConical className="w-4 h-4" />
-            <span>STRATEGY LAB & BACKTEST</span>
-          </button>
+            {/* Workspace 3: Trade Book & Forensics */}
+            {currentWorkspace === "TRADE_BOOK" && <TradeBookTab />}
 
-          <button
-            onClick={() => setCurrentTab("USAGE_BILLING")}
-            className={`flex items-center gap-2 py-2.5 px-3.5 border-b-2 transition font-mono ${
-              currentTab === "USAGE_BILLING"
-                ? "border-cyan-500 text-cyan-400 font-bold bg-cyan-950/20"
-                : "border-transparent text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            <BarChart3 className="w-4 h-4" />
-            <span>AI USAGE & BILLING</span>
-          </button>
-        </div>
+            {/* Workspace 4: Performance Analytics */}
+            {currentWorkspace === "PERFORMANCE" && <UsageAnalyticsTab />}
 
-        {/* Selected Pair Indicator + Ctrl+K shortcut */}
-        <div className="hidden sm:flex items-center gap-2 text-slate-400 text-xs">
-          <button
-            onClick={() => setIsQuickSwitcherOpen(true)}
-            className="flex items-center gap-2 px-2.5 py-1 rounded bg-[#0f1623] hover:bg-[#151f32] border border-slate-800 text-slate-300 transition group"
-            title="Press Ctrl+K to change instrument"
-          >
-            <span className="text-[10px] text-slate-500 uppercase font-mono">Pair:</span>
-            <span className="font-bold text-white font-mono group-hover:text-cyan-300">
-              {activeInst.symbol}
-            </span>
-            <span className="text-[10px] text-cyan-400 font-mono">({store.selectedTimeframe})</span>
-            <kbd className="text-[9px] bg-slate-900 border border-slate-700/80 px-1 rounded text-slate-400">
-              ⌘K
-            </kbd>
-          </button>
-        </div>
-      </nav>
+            {/* Workspace 5: Risk & Pair Settings */}
+            {currentWorkspace === "RISK_SETTINGS" && (
+              <RiskPairSettingsTab
+                onOpenAdvancedSettings={() => setIsSettingsOpen(true)}
+                isMt5Connected={store.isMt5Connected}
+                dbHealthy={store.dbHealthy}
+              />
+            )}
+          </ErrorBoundary>
+        </main>
+      </div>
 
-      {/* Main Workspace Area Wrapped in ErrorBoundary */}
-      <main className="flex-1 p-3.5 overflow-y-auto">
-        <ErrorBoundary>
-          {currentTab === "COCKPIT" && (
-            <CockpitTab
-              selectedSymbol={store.selectedSymbol}
-              selectedTimeframe={store.selectedTimeframe}
-              isMt5Connected={store.isMt5Connected}
-              executionMode={store.executionMode}
-              openPositions={store.openPositions}
-              pendingOrders={store.pendingOrders}
-              plannedTrades={store.plannedTrades}
-              pairSchedules={store.pairSchedules}
-              quotes={store.quotes}
-              equity={store.equity}
-              balance={store.balance}
-              onSelectSymbol={store.setSelectedSymbol}
-              onSelectTimeframe={store.setSelectedTimeframe}
-              onApproveCopilot={store.approveCopilot}
-              onRejectCopilot={store.rejectCopilot}
-            />
-          )}
-
-          {currentTab === "AI_SUPERVISOR" && (
-            <AIBrainTab
-              selectedSymbol={store.selectedSymbol}
-              pairSchedules={store.pairSchedules}
-            />
-          )}
-
-          {currentTab === "TRADE_BOOK" && <TradeBookTab />}
-
-          {currentTab === "STRATEGY_LAB" && (
-            <StrategyLabTab selectedSymbol={store.selectedSymbol} />
-          )}
-
-          {currentTab === "USAGE_BILLING" && <UsageAnalyticsTab />}
-        </ErrorBoundary>
-      </main>
-
-      {/* Quick Pair Switcher Modal (Ctrl+K) */}
+      {/* Quick Command & Pair Palette Modal (Ctrl+K / ⌘K) */}
       <QuickSymbolSwitcher
         isOpen={isQuickSwitcherOpen}
         onClose={() => setIsQuickSwitcherOpen(false)}
         selectedSymbol={store.selectedSymbol}
         onSelectSymbol={store.setSelectedSymbol}
+        onSelectWorkspace={setCurrentWorkspace}
         quotes={store.quotes}
       />
 
-      {/* Settings Modal */}
+      {/* Advanced MT5 Broker & Database Settings Modal */}
       <SettingsModal
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}

@@ -50,6 +50,11 @@ class TelegramNotifier:
         # In-memory deduplication cache: event_key -> expire_timestamp
         self._sent_events: Dict[str, float] = {}
         self._http_client: Optional[httpx.AsyncClient] = None
+        self._last_error: Optional[str] = None
+
+    def get_last_error(self) -> Optional[str]:
+        """Return the most recent dispatch or delivery error message, if any."""
+        return self._last_error
 
     def clear_cache(self) -> None:
         """Purge expired and active event deduplication keys."""
@@ -159,6 +164,7 @@ class TelegramNotifier:
                 try:
                     res = await client.post(url, json=payload)
                     if res.status_code == 200:
+                        self._last_error = None
                         return True
 
                     if res.status_code == 429:
@@ -181,11 +187,17 @@ class TelegramNotifier:
                         payload["text"] = _strip_html(text)
                         payload.pop("parse_mode", None)
                         fallback_res = await client.post(url, json=payload)
-                        return fallback_res.status_code == 200
+                        if fallback_res.status_code == 200:
+                            self._last_error = None
+                            return True
+                        self._last_error = f"HTTP {fallback_res.status_code}: {fallback_res.text}"
+                        return False
 
+                    self._last_error = f"HTTP {res.status_code}: {res.text}"
                     logger.warning(f"Telegram sendMessage failed [{res.status_code}]: {res.text}")
                     return False
                 except (httpx.TimeoutException, httpx.NetworkError) as net_err:
+                    self._last_error = f"Network error: {str(net_err)}"
                     logger.warning(f"Telegram network attempt {attempt + 1} error: {net_err}")
                     if attempt == 0:
                         await asyncio.sleep(0.5)
@@ -202,64 +214,83 @@ class TelegramNotifier:
         silent: bool = False,
         event_key: Optional[str] = None,
         ttl_seconds: float = 300.0,
+        bypass_dedup: bool = False,
+        bypass_category_check: bool = False,
+        force_send: bool = False,
+        override_chat_id: Optional[str] = None,
     ) -> bool:
         """
         Non-blocking dispatch: checks active config, evaluates category toggle,
         enforces anti-spam deduplication, and sends to admin chat + active recipients.
+        When bypass_dedup=True or force_send=True: deduplication cache is bypassed.
+        When bypass_category_check=True or force_send=True: category subscription toggle is ignored.
+        When force_send=True: master enabled toggle is ignored (still requires valid bot_token).
+        When override_chat_id is provided: sends directly to that specific chat_id.
         """
         # Deduplication check
-        if event_key:
+        if event_key and not bypass_dedup and not force_send:
             if self.is_duplicate(event_key):
                 logger.debug(f"Telegram notification deduplicated and skipped: {event_key}")
                 return False
             self.record_event(event_key, ttl_seconds)
 
         cfg = self.get_config()
-        if not cfg["enabled"] or not cfg["bot_token"]:
-            logger.debug(f"Telegram alert skipped: bot disabled or no token ({category}).")
+        if not force_send and not cfg["enabled"]:
+            logger.debug(f"Telegram alert skipped: bot disabled ({category}).")
+            return False
+
+        if not cfg["bot_token"]:
+            logger.debug(f"Telegram alert skipped: no token ({category}).")
+            self._last_error = "Telegram bot token is not configured."
             return False
 
         # Category check
-        if category == "PRE_TRIGGER" and not cfg["notify_pre_trigger"]:
-            return False
-        if category in ("EXECUTION", "LIMIT") and not cfg["notify_executions"]:
-            return False
-        if category in ("BREAKEVEN", "PARTIAL") and not cfg["notify_be_and_partials"]:
-            return False
-        if category == "CLOSE" and not cfg["notify_closures"]:
-            return False
-        if category == "SYSTEM" and not cfg["notify_system_alerts"]:
-            return False
+        if not bypass_category_check and not force_send:
+            if category == "PRE_TRIGGER" and not cfg["notify_pre_trigger"]:
+                return False
+            if category in ("EXECUTION", "LIMIT") and not cfg["notify_executions"]:
+                return False
+            if category in ("BREAKEVEN", "PARTIAL") and not cfg["notify_be_and_partials"]:
+                return False
+            if category == "CLOSE" and not cfg["notify_closures"]:
+                return False
+            if category == "SYSTEM" and not cfg["notify_system_alerts"]:
+                return False
 
         token = cfg["bot_token"]
         thread_id = cfg.get("thread_id")
 
-        # Collect target chat IDs: admin chat_id + any active DB TelegramRecipient
+        # Collect target chat IDs: override_chat_id or admin chat_id + any active DB TelegramRecipient
         target_chats: List[str] = []
-        if cfg.get("chat_id"):
-            target_chats.append(str(cfg["chat_id"]))
+        if override_chat_id:
+            target_chats.append(str(override_chat_id).strip())
+        elif cfg.get("chat_id"):
+            target_chats.append(str(cfg["chat_id"]).strip())
 
-        try:
-            from backend.app.db.session import SessionLocal
-            from backend.app.db.models import TelegramRecipient
+        # For normal operations (not single-target test), include active DB recipients
+        if not override_chat_id:
+            try:
+                from backend.app.db.session import SessionLocal
+                from backend.app.db.models import TelegramRecipient
 
-            with SessionLocal() as db:
-                query = db.query(TelegramRecipient).filter_by(is_active=True)
-                if category == "PRE_TRIGGER":
-                    query = query.filter_by(receive_setups=True)
-                elif category in ("EXECUTION", "LIMIT", "BREAKEVEN", "PARTIAL", "CLOSE"):
-                    query = query.filter_by(receive_executions=True)
-                elif category == "SYSTEM":
-                    query = query.filter_by(receive_reports=True)
+                with SessionLocal() as db:
+                    query = db.query(TelegramRecipient).filter_by(is_active=True)
+                    if category == "PRE_TRIGGER":
+                        query = query.filter_by(receive_setups=True)
+                    elif category in ("EXECUTION", "LIMIT", "BREAKEVEN", "PARTIAL", "CLOSE"):
+                        query = query.filter_by(receive_executions=True)
+                    elif category == "SYSTEM":
+                        query = query.filter_by(receive_reports=True)
 
-                for r in query.all():
-                    if r.chat_id and str(r.chat_id) not in target_chats:
-                        target_chats.append(str(r.chat_id))
-        except Exception as e:
-            logger.debug(f"Could not load additional Telegram recipients: {e}")
+                    for r in query.all():
+                        if r.chat_id and str(r.chat_id).strip() not in target_chats:
+                            target_chats.append(str(r.chat_id).strip())
+            except Exception as e:
+                logger.debug(f"Could not load additional Telegram recipients: {e}")
 
         if not target_chats:
-            logger.debug("No active Telegram chat IDs registered to receive message.")
+            logger.warning("No active Telegram chat IDs registered to receive message.")
+            self._last_error = "No active Telegram chat ID configured."
             return False
 
         # Fire and forget: send to all target chats concurrently
@@ -325,6 +356,10 @@ class TelegramNotifier:
         confluence_factors: Optional[List[str]] = None,
         thesis: Optional[str] = None,
         silent: Optional[bool] = None,
+        bypass_dedup: bool = False,
+        bypass_category_check: bool = False,
+        force_send: bool = False,
+        override_chat_id: Optional[str] = None,
     ) -> bool:
         """
         Radar alert for developing high-probability trade setups before trigger fires.
@@ -381,6 +416,10 @@ class TelegramNotifier:
             silent=is_silent,
             event_key=event_key,
             ttl_seconds=ttl,
+            bypass_dedup=bypass_dedup,
+            bypass_category_check=bypass_category_check,
+            force_send=force_send,
+            override_chat_id=override_chat_id,
         )
 
     # ==========================================================================
@@ -405,6 +444,10 @@ class TelegramNotifier:
         confidence: float = 0.85,
         gate_summary: Optional[Dict[str, bool]] = None,
         ai_summary: Optional[str] = None,
+        bypass_dedup: bool = False,
+        bypass_category_check: bool = False,
+        force_send: bool = False,
+        override_chat_id: Optional[str] = None,
     ) -> bool:
         """
         Alert for newly filled market order or staged pending limit order.
@@ -494,6 +537,10 @@ class TelegramNotifier:
             category="EXECUTION" if not is_limit_order else "LIMIT",
             event_key=event_key,
             ttl_seconds=86400.0,
+            bypass_dedup=bypass_dedup,
+            bypass_category_check=bypass_category_check,
+            force_send=force_send,
+            override_chat_id=override_chat_id,
         )
 
     # ==========================================================================
@@ -511,6 +558,10 @@ class TelegramNotifier:
         tp1: Optional[float] = None,
         tp2: Optional[float] = None,
         reason: Optional[str] = None,
+        bypass_dedup: bool = False,
+        bypass_category_check: bool = False,
+        force_send: bool = False,
+        override_chat_id: Optional[str] = None,
     ) -> bool:
         """Alert when resting limit order fills into a live position or expires."""
         event_key = f"LIMIT_{action.upper()}:{ticket}"
@@ -548,6 +599,10 @@ class TelegramNotifier:
             category="LIMIT",
             event_key=event_key,
             ttl_seconds=86400.0,
+            bypass_dedup=bypass_dedup,
+            bypass_category_check=bypass_category_check,
+            force_send=force_send,
+            override_chat_id=override_chat_id,
         )
 
     # ==========================================================================
@@ -562,6 +617,10 @@ class TelegramNotifier:
         new_sl: float,
         current_r: float = 1.0,
         next_target: Optional[float] = None,
+        bypass_dedup: bool = False,
+        bypass_category_check: bool = False,
+        force_send: bool = False,
+        override_chat_id: Optional[str] = None,
     ) -> bool:
         """Alert when position reaches +1.0R and SL is shifted to Entry + Buffer."""
         event_key = f"BE:{ticket}"
@@ -587,6 +646,10 @@ class TelegramNotifier:
             category="BREAKEVEN",
             event_key=event_key,
             ttl_seconds=86400.0,
+            bypass_dedup=bypass_dedup,
+            bypass_category_check=bypass_category_check,
+            force_send=force_send,
+            override_chat_id=override_chat_id,
         )
 
     # ==========================================================================
@@ -603,6 +666,10 @@ class TelegramNotifier:
         trailed_sl: float,
         tp2: float,
         current_r: float = 1.5,
+        bypass_dedup: bool = False,
+        bypass_category_check: bool = False,
+        force_send: bool = False,
+        override_chat_id: Optional[str] = None,
     ) -> bool:
         """Alert when TP1 is struck, 60% banked, and runner SL trailed in profit."""
         event_key = f"TP1:{ticket}"
@@ -627,6 +694,10 @@ class TelegramNotifier:
             category="PARTIAL",
             event_key=event_key,
             ttl_seconds=86400.0,
+            bypass_dedup=bypass_dedup,
+            bypass_category_check=bypass_category_check,
+            force_send=force_send,
+            override_chat_id=override_chat_id,
         )
 
     # ==========================================================================
@@ -649,6 +720,10 @@ class TelegramNotifier:
         hold_duration_str: str = "42m",
         prior_partial_pnl: float = 0.0,
         today_scorecard: Optional[Dict[str, Any]] = None,
+        bypass_dedup: bool = False,
+        bypass_category_check: bool = False,
+        force_send: bool = False,
+        override_chat_id: Optional[str] = None,
     ) -> bool:
         """
         Alert on final position closure. Aggregates any prior TP1 profit + final deals,
@@ -719,6 +794,10 @@ class TelegramNotifier:
             category="CLOSE",
             event_key=event_key,
             ttl_seconds=86400.0,
+            bypass_dedup=bypass_dedup,
+            bypass_category_check=bypass_category_check,
+            force_send=force_send,
+            override_chat_id=override_chat_id,
         )
 
     async def notify_trade_closed_from_deal(
@@ -790,6 +869,10 @@ class TelegramNotifier:
         details: str,
         action_taken: str,
         severity: str = "WARNING",  # "INFO" | "WARNING" | "CRITICAL"
+        bypass_dedup: bool = False,
+        bypass_category_check: bool = False,
+        force_send: bool = False,
+        override_chat_id: Optional[str] = None,
     ) -> bool:
         """Alert on system guardrail triggers, rule promotions, or vault events."""
         event_key = f"GUARDRAIL:{alert_type}:{title[:20]}"
@@ -810,6 +893,10 @@ class TelegramNotifier:
             category="SYSTEM",
             event_key=event_key,
             ttl_seconds=1800.0,
+            bypass_dedup=bypass_dedup,
+            bypass_category_check=bypass_category_check,
+            force_send=force_send,
+            override_chat_id=override_chat_id,
         )
 
     # ==========================================================================
@@ -820,6 +907,10 @@ class TelegramNotifier:
         reconciled_count: int,
         total_net_pnl: float,
         open_remaining: int,
+        bypass_dedup: bool = False,
+        bypass_category_check: bool = False,
+        force_send: bool = False,
+        override_chat_id: Optional[str] = None,
     ) -> bool:
         """Single consolidated summary when startup reconciles > 1 orphaned trades."""
         if reconciled_count <= 0:
@@ -840,6 +931,10 @@ class TelegramNotifier:
             category="SYSTEM",
             event_key=f"RECONCILE_BATCH_{reconciled_count}",
             ttl_seconds=300.0,
+            bypass_dedup=bypass_dedup,
+            bypass_category_check=bypass_category_check,
+            force_send=force_send,
+            override_chat_id=override_chat_id,
         )
 
     # --------------------------------------------------------------------------

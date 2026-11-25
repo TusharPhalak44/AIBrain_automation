@@ -1,0 +1,7 @@
+cd E:\AIBrain
+
+# Activate Python Virtual Environment
+.\.venv\Scripts\Activate.ps1
+
+# Start the API server with hot-reload
+python -m uvicorn backend.app.api.server:app --host 127.0.0.1 --port 8000 --reload

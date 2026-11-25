@@ -232,8 +232,8 @@ class ReportExporter:
                 t.mode,
                 t.direction,
                 f"{float(t.lots):.2f}",
-                f"{float(t.entry_price):.2f}",
-                f"{float(t.exit_price):.2f}" if t.exit_price else "-",
+                _format_price_for_export(t.entry_price, t.symbol),
+                _format_price_for_export(t.exit_price, t.symbol) if t.exit_price else "-",
                 f"${pnl_val:.2f}",
                 t.exit_reason or "-",
             ])
