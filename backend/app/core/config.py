@@ -1,9 +1,11 @@
+
 """Application Configuration and Environment Settings."""
 
 import os
 from pathlib import Path
-from pydantic_settings import BaseSettings, SettingsConfigDict
+
 from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import URL
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
@@ -32,9 +34,12 @@ class Settings(BaseSettings):
     DEBUG: bool = Field(default=False, description="Debug mode")
 
     # Timezones & Broker Clock Sync
-    DISPLAY_TIMEZONE: str = Field(default="Asia/Kolkata", description="UI display timezone")
+    DISPLAY_TIMEZONE: str = Field(
+        default="Asia/Kolkata", description="UI display timezone"
+    )
     BROKER_TZ_OFFSET_SEC: int = Field(
-        default=7200, description="Broker server offset vs UTC (e.g., 7200 for GMT+2, 10800 for GMT+3)"
+        default=7200,
+        description="Broker server offset vs UTC (e.g., 7200 for GMT+2, 10800 for GMT+3)",
     )
 
     # MT5 Terminal
@@ -44,8 +49,12 @@ class Settings(BaseSettings):
     )
 
     # Telegram Alerting Fallbacks
-    TELEGRAM_BOT_TOKEN: str = Field(default="", description="Optional Telegram bot token fallback")
-    TELEGRAM_CHAT_ID: str = Field(default="", description="Optional Telegram chat ID fallback")
+    TELEGRAM_BOT_TOKEN: str = Field(
+        default="", description="Optional Telegram bot token fallback"
+    )
+    TELEGRAM_CHAT_ID: str = Field(
+        default="", description="Optional Telegram chat ID fallback"
+    )
 
     # Recovery Spool
     MYSQL_SPOOL_PATH: Path = Field(
@@ -61,16 +70,26 @@ class Settings(BaseSettings):
     @property
     def mysql_base_uri(self) -> str:
         """Database server URI without specific database name."""
-        auth = self.MYSQL_USER
-        if self.MYSQL_PASSWORD:
-            auth += f":{self.MYSQL_PASSWORD}"
-        return f"mysql+pymysql://{auth}@{self.MYSQL_HOST}:{self.MYSQL_PORT}/"
+        return URL.create(
+            drivername="mysql+pymysql",
+            username=self.MYSQL_USER,
+            password=self.MYSQL_PASSWORD or None,
+            host=self.MYSQL_HOST,
+            port=self.MYSQL_PORT,
+        ).render_as_string(hide_password=False)
 
     @property
     def mysql_database_uri(self) -> str:
         """Full database connection URI."""
-        return f"{self.mysql_base_uri}{self.MYSQL_DATABASE}?charset=utf8mb4"
+        return URL.create(
+            drivername="mysql+pymysql",
+            username=self.MYSQL_USER,
+            password=self.MYSQL_PASSWORD or None,
+            host=self.MYSQL_HOST,
+            port=self.MYSQL_PORT,
+            database=self.MYSQL_DATABASE,
+            query={"charset": "utf8mb4"},
+        ).render_as_string(hide_password=False)
 
 
 settings = Settings()
-
